@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="engine.eval.EvalSymmetryTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-06-30T21:54:53.631Z" hostname="SVIATOSLAV" time="0.004">
+  <properties/>
+  <testcase name="evalIsColorSymmetric()" classname="engine.eval.EvalSymmetryTest" time="0.003"/>
+  <testcase name="startposIsBalanced()" classname="engine.eval.EvalSymmetryTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

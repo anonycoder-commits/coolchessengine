@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="engine.board.MakeUnmakeTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-06-30T21:54:37.956Z" hostname="SVIATOSLAV" time="0.126">
+  <properties/>
+  <testcase name="reversibleAndHashConsistent()" classname="engine.board.MakeUnmakeTest" time="0.113"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

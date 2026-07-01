@@ -1,0 +1,17 @@
+{
+  "active": false,
+  "current_phase": "spec-complete-pending-approval",
+  "interview_id": "chess-engine-2026-06-30",
+  "type": "greenfield",
+  "threshold": "0.2",
+  "threshold_source": "default",
+  "current_ambiguity": "0.20",
+  "spec_path": ".omc/specs/deep-interview-chess-engine.md",
+  "status": "PASSED",
+  "_meta": {
+    "mode": "deep-interview",
+    "sessionId": null,
+    "updatedAt": "2026-06-30T21:02:40.461Z",
+    "updatedBy": "state_write_tool"
+  }
+}

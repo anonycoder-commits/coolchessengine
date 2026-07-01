@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="engine.board.PerftTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-06-30T21:54:38.085Z" hostname="SVIATOSLAV" time="15.546">
+  <properties/>
+  <testcase name="startposDepth6()" classname="engine.board.PerftTest" time="4.115"/>
+  <testcase name="startposShallow()" classname="engine.board.PerftTest" time="0.177"/>
+  <testcase name="kiwipete()" classname="engine.board.PerftTest" time="7.0"/>
+  <testcase name="position3()" classname="engine.board.PerftTest" time="0.48"/>
+  <testcase name="position4()" classname="engine.board.PerftTest" time="0.559"/>
+  <testcase name="position5()" classname="engine.board.PerftTest" time="3.213"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

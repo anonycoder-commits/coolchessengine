@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="engine.search.SearchPhase2Test" tests="9" skipped="0" failures="0" errors="0" timestamp="2026-06-30T21:54:53.638Z" hostname="SVIATOSLAV" time="0.451">
+  <properties/>
+  <testcase name="ttDoesNotChangeResultKiwipete()" classname="engine.search.SearchPhase2Test" time="0.263"/>
+  <testcase name="repetitionIsDetectedAsDraw()" classname="engine.search.SearchPhase2Test" time="0.002"/>
+  <testcase name="alphaBetaEqualsMinimaxStartpos()" classname="engine.search.SearchPhase2Test" time="0.022"/>
+  <testcase name="ttDoesNotChangeResultStartpos()" classname="engine.search.SearchPhase2Test" time="0.048"/>
+  <testcase name="transpositionTableStoreProbeRoundTrip()" classname="engine.search.SearchPhase2Test" time="0.001"/>
+  <testcase name="findsMateInTwoWithCorrectScore()" classname="engine.search.SearchPhase2Test" time="0.003"/>
+  <testcase name="alphaBetaEqualsMinimaxItalian()" classname="engine.search.SearchPhase2Test" time="0.097"/>
+  <testcase name="fiftyMoveRuleIsDraw()" classname="engine.search.SearchPhase2Test" time="0.001"/>
+  <testcase name="alphaBetaEqualsMinimaxKiwipete()" classname="engine.search.SearchPhase2Test" time="0.011"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

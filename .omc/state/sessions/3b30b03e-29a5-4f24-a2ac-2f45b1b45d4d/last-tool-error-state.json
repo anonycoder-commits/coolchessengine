@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd \\\"C:\\\\Users\\\\svjat\\\\dev\\\\chess engine\\\" && mkdir -p build/classes && javac -d build/classes $(find src/main/java -name \\\"*.java\\\") 2>&1 && echo \\\"COMPILE OK\\\" && java -cp build/classes ...",
+  "error": "Exit code 1\nCOMPILE OK\nException in thread \"main\" java.lang.ExceptionInInitializerError\r\n\tat engine.board.MoveGenerator.generatePseudoLegal(MoveGenerator.java:39)\r\n\tat engine.board.MoveGenerator.generateLegal(MoveGenerator.java:12)\r\n\tat engine.board.Perft.perft(Perft.java:13)\r\n\tat engine.board.Perft.main(Perft.java:69)\r\nCaused by: java.lang.NullPointerException: Cannot load from int array because \"engine.board.Attacks.DF\" is null\r\n\tat engine.board.Attacks.initRays(Attacks.java:77)\r\n\tat engine.bo...",
+  "timestamp": "2026-06-30T21:25:08.356Z",
+  "retry_count": 1
+}

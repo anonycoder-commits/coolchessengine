@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "entries": {
+    "1bb6914bc42b891c26d46c8ae2fd4f44071f59862e89dc550f4c82877b700216": {
+      "last_emitted_at_ms": 1782856322583,
+      "message": "The boulder never stops. Continue until all tasks complete."
+    },
+    "79a93d4a2f8f50b95f852280616242fee1855dc99a3c75211917f55e72e95fae": {
+      "last_emitted_at_ms": 1782856263173,
+      "message": "Use parallel execution for independent tasks. Use run_in_background for long operations (npm install, builds, tests)."
+    },
+    "445ed27a3872b681d98190bae61ccb84954e1bc4e140df5370be958dee776b3a": {
+      "last_emitted_at_ms": 1782856219966,
+      "message": "Verify changes work after editing. Test functionality before marking complete."
+    },
+    "466399dafa2d20f60587180bad0a07358eb7f2bce724df0ff682f038ad33f5ad": {
+      "last_emitted_at_ms": 1782856206131,
+      "message": "Read multiple files in parallel when possible for faster analysis."
+    },
+    "459c54e5f35d6a58dcd90d2aecc21fa6d1f35d241bc5b134c506f87dc7b6d67b": {
+      "last_emitted_at_ms": 1782855240859,
+      "message": "Combine searches in parallel when investigating multiple patterns."
+    },
+    "81764115e3e95fd08db7359db0f4997146d8039a5f26b19b365fbe3611de36ea": {
+      "last_emitted_at_ms": 1782855227920,
+      "message": "Spawning agent: oh-my-claudecode:executor (opus) | Task: Chess engine Phase 3: evaluation"
+    },
+    "aa6c2cba13cbb3fd7740abb37af69d813d838710bea98dbf21ddd846fa405851": {
+      "last_emitted_at_ms": 1782854092959,
+      "message": "Spawning agent: oh-my-claudecode:executor (opus) | Task: Chess engine Phase 0+1: core engine"
+    },
+    "42619a2f8fa9607106df3db1551f114ebf7a31d4203bcf847e16c4602475591e": {
+      "last_emitted_at_ms": 1782853611977,
+      "message": "Spawning agent: oh-my-claudecode:critic (inherit) | Task: Critic review of chess engine plan"
+    },
+    "638842930337784ac72df5932e3a45e5155a13b69dbf8f048c3fe4bf3ffbc9c3": {
+      "last_emitted_at_ms": 1782853454132,
+      "message": "Spawning agent: oh-my-claudecode:architect (inherit) | Task: Architect review of chess engine plan"
+    }
+  },
+  "updated_at": "2026-06-30T21:52:02.583Z"
+}
