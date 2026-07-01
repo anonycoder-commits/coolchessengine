@@ -14,9 +14,8 @@ import engine.search.SearchLimits;
 /**
  * Minimal UCI handler (Phase 1b walking skeleton).
  *
- * Supports: uci, isready, ucinewgame, position (startpos|fen ... [moves ...]),
- * go [depth N], stop, quit. Drives a fixed-depth negamax with material-only eval.
- * The full basic command set (time controls, Hash option, etc.) arrives in Phase 4.
+ * Supports: uci, isready, ucinewgame, setoption (Hash), position (startpos|fen ... [moves ...]),
+ * go [depth N | movetime | wtime/btime/winc/binc/movestogo | infinite], stop, quit.
  */
 public final class Uci {
 
@@ -42,6 +41,7 @@ public final class Uci {
                 case "uci":
                     System.out.println("id name " + NAME);
                     System.out.println("id author " + AUTHOR);
+                    System.out.println("option name Hash type spin default 16 min 1 max 1024");
                     System.out.println("uciok");
                     break;
                 case "isready":
@@ -50,6 +50,9 @@ public final class Uci {
                 case "ucinewgame":
                     position = Position.startpos();
                     search.newGame();
+                    break;
+                case "setoption":
+                    handleSetOption(tokens);
                     break;
                 case "position":
                     handlePosition(tokens);
@@ -67,6 +70,21 @@ public final class Uci {
                     break;
             }
             System.out.flush();
+        }
+    }
+
+    /** Handles {@code setoption name <id> [value <x>]}; unknown options are ignored per UCI convention. */
+    private void handleSetOption(String[] tokens) {
+        int nameIdx = -1, valueIdx = -1;
+        for (int i = 1; i < tokens.length; i++) {
+            if (tokens[i].equalsIgnoreCase("name")) nameIdx = i;
+            else if (tokens[i].equalsIgnoreCase("value")) valueIdx = i;
+        }
+        if (nameIdx < 0 || nameIdx + 1 >= tokens.length) return;
+        String name = tokens[nameIdx + 1];
+        if (name.equalsIgnoreCase("Hash") && valueIdx >= 0) {
+            int mb = parseInt(tokens, valueIdx + 1);
+            if (mb > 0) search.setHashSize(mb);
         }
     }
 
@@ -117,6 +135,7 @@ public final class Uci {
         if (!anyLimit) limits.depth = DEFAULT_DEPTH;
 
         int best = search.think(position, limits);
+        if (search.bypassPrinted) return; // Search already emitted bestmove for the forced-move case
         String pv = best != 0 ? Move.toUci(best) : "0000";
         System.out.println("bestmove " + pv);
     }

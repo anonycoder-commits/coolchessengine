@@ -14,8 +14,9 @@ import engine.board.Position;
  * mate scoring, move ordering (TT move, MVV-LVA, killers, history), quiescence search
  * with bounded check evasions, and threefold-repetition / fifty-move draw detection.
  *
- * Evaluation is pluggable via {@link Evaluator}; Phase 3 supplies the real handcrafted
- * evaluation, this phase ships a {@link MaterialEvaluator} stub.
+ * Evaluation is pluggable via {@link Evaluator}; the default constructor uses
+ * {@link HandcraftedEvaluator} (Phase 3's real handcrafted evaluation). {@link MaterialEvaluator}
+ * remains available as a material-only stub for tests and reference comparisons.
  */
 public final class Search {
 
@@ -42,6 +43,16 @@ public final class Search {
     private final int[][] killers = new int[MAX_PLY + 1][2];
     private final int[][][] history = new int[2][64][64];
 
+    // Per-ply scratch buffers, reused across nodes instead of allocating a MoveList +
+    // score array at every call. Safe single-threaded: negamax/quiescence recursion
+    // strictly increases ply down the call stack, so a given ply's slot is never
+    // "live" in two frames at once (make/unmake backtracking guarantees this).
+    private final MoveList[] moveListPool = new MoveList[MAX_PLY + 2];
+    private final int[][] scorePool = new int[MAX_PLY + 2][256];
+    {
+        for (int i = 0; i < moveListPool.length; i++) moveListPool[i] = new MoveList();
+    }
+
     // Search state
     private long nodes;
     private long startNanos;
@@ -53,6 +64,7 @@ public final class Search {
 
     private int rootBestMove;
     private int rootBestScore;
+    private int rootSecondBestScore;
 
     // Public results / toggles
     public int bestMove;
@@ -62,8 +74,15 @@ public final class Search {
     public boolean useQuiescence = true;
     public boolean useCheckExtension = true;
 
+    // Obvious-move pruning: skip search entirely on a forced single reply, and cut
+    // iterative deepening short once a shallow iteration shows a lopsided root gap.
+    public boolean useObviousMovePruning = true;
+    public int obviousMoveCheckDepth = 3;
+    public int obviousMoveMargin = 300;
+    public boolean bypassPrinted;
+
     public Search() {
-        this(new MaterialEvaluator(), DEFAULT_HASH_MB);
+        this(new HandcraftedEvaluator(), DEFAULT_HASH_MB);
     }
 
     public Search(Evaluator evaluator, int hashMb) {
@@ -84,10 +103,20 @@ public final class Search {
 
     /** Iterative-deepening search under the given limits. Returns the best move. */
     public int think(Position pos, SearchLimits limits) {
+        bypassPrinted = false;
         nodes = 0;
         stop = false;
+
+        MoveList rootMoves = moveListPool[0];
+        rootMoves.clear();
+        MoveGenerator.generateLegal(pos, rootMoves);
+        if (rootMoves.size == 1) {
+            return bypassForcedMove(pos, rootMoves.moves[0]);
+        }
+
         rootBestMove = 0;
         rootBestScore = 0;
+        rootSecondBestScore = 0;
         resetHeuristics();
         startNanos = System.nanoTime();
         computeTimeLimits(limits, pos.sideToMove());
@@ -98,6 +127,8 @@ public final class Search {
 
         for (int d = 1; d <= maxDepth; d++) {
             currentDepth = d;
+            rootBestScore = -INF;
+            rootSecondBestScore = -INF;
             int score = negamax(pos, d, -INF, INF, 0);
             if (stop && d > 1) break; // abandon the partial iteration, keep last completed result
             committedMove = rootBestMove;
@@ -105,6 +136,9 @@ public final class Search {
             if (printInfo) printInfo(d, score);
             if (useTime && elapsedMs() >= softLimitMs) break;
             if (Math.abs(score) >= MATE_IN_MAX) break; // forced mate found
+            // Only cut fixed-depth/analysis searches short when they're actually racing a
+            // clock; otherwise "go depth N" would silently return a shallower result than asked.
+            if (useTime && hasResolvedRootGap(d)) break;
         }
 
         if (committedMove == 0) {
@@ -116,6 +150,29 @@ public final class Search {
         bestMove = committedMove;
         bestScore = committedScore;
         return committedMove;
+    }
+
+    /** Instant bypass: with exactly one legal reply, skip the search tree and play it. */
+    private int bypassForcedMove(Position pos, int onlyMove) {
+        bestMove = onlyMove;
+        bestScore = evaluator.evaluate(pos);
+        if (printInfo) {
+            System.out.println("bestmove " + Move.toUci(onlyMove));
+            System.out.flush();
+            bypassPrinted = true;
+        }
+        return onlyMove;
+    }
+
+    /**
+     * Soft-bound early exit: once {@code obviousMoveCheckDepth} completes, a root-move
+     * score gap beyond {@code obviousMoveMargin} centipawns is treated as a resolved
+     * position, and iterative deepening stops instead of spending time confirming it.
+     */
+    private boolean hasResolvedRootGap(int depth) {
+        if (!useObviousMovePruning || depth < obviousMoveCheckDepth) return false;
+        if (rootSecondBestScore <= -INF) return false; // fewer than two scored root moves
+        return (rootBestScore - rootSecondBestScore) > obviousMoveMargin;
     }
 
     private int negamax(Position pos, int depth, int alpha, int beta, int ply) {
@@ -145,14 +202,16 @@ public final class Search {
             }
         }
 
-        MoveList moves = new MoveList();
+        MoveList moves = moveListPool[ply];
+        moves.clear();
         MoveGenerator.generateLegal(pos, moves);
         if (moves.size == 0) {
             return inCheck ? -MATE + ply : DRAW; // checkmate or stalemate
         }
 
         int us = pos.sideToMove();
-        int[] scores = scoreMoves(pos, moves, ttMove, ply, us);
+        int[] scores = scoreArray(ply, moves.size);
+        scoreMoves(pos, moves, ttMove, ply, us, scores);
 
         int bestScore = -INF;
         int localBest = 0;
@@ -166,13 +225,12 @@ public final class Search {
             pos.unmakeMove(move);
             if (stop) return 0;
 
+            if (ply == 0) updateRootMargin(score);
+
             if (score > bestScore) {
                 bestScore = score;
                 localBest = move;
-                if (ply == 0) {
-                    rootBestMove = move;
-                    rootBestScore = score;
-                }
+                if (ply == 0) rootBestMove = move;
                 if (score > alpha) {
                     alpha = score;
                     if (alpha >= beta) {
@@ -215,7 +273,8 @@ public final class Search {
             if (standPat > alpha) alpha = standPat;
         }
 
-        MoveList moves = new MoveList();
+        MoveList moves = moveListPool[ply];
+        moves.clear();
         int nextBudget = checkBudget;
         if (inCheck) {
             MoveGenerator.generateLegal(pos, moves);
@@ -225,7 +284,8 @@ public final class Search {
             MoveGenerator.generateLegalCaptures(pos, moves);
         }
 
-        int[] scores = scoreMovesQ(pos, moves);
+        int[] scores = scoreArray(ply, moves.size);
+        scoreMovesQ(pos, moves, scores);
         for (int i = 0; i < moves.size; i++) {
             selectNext(moves, scores, i);
             int move = moves.moves[i];
@@ -246,12 +306,21 @@ public final class Search {
 
     // --- move ordering ---
 
-    private int[] scoreMoves(Position pos, MoveList moves, int ttMove, int ply, int us) {
-        int[] s = new int[moves.size];
-        for (int i = 0; i < moves.size; i++) {
-            s[i] = scoreMove(pos, moves.moves[i], ttMove, ply, us);
+    /** Returns the pooled score buffer for {@code ply}, growing it only in the (never-hit
+     *  in legal chess) case where a move list exceeds the pool's default capacity. */
+    private int[] scoreArray(int ply, int minSize) {
+        int[] s = scorePool[ply];
+        if (s.length < minSize) {
+            s = new int[minSize];
+            scorePool[ply] = s;
         }
         return s;
+    }
+
+    private void scoreMoves(Position pos, MoveList moves, int ttMove, int ply, int us, int[] scores) {
+        for (int i = 0; i < moves.size; i++) {
+            scores[i] = scoreMove(pos, moves.moves[i], ttMove, ply, us);
+        }
     }
 
     private int scoreMove(Position pos, int move, int ttMove, int ply, int us) {
@@ -274,8 +343,7 @@ public final class Search {
         return history[us][Move.from(move)][Move.to(move)];
     }
 
-    private int[] scoreMovesQ(Position pos, MoveList moves) {
-        int[] s = new int[moves.size];
+    private void scoreMovesQ(Position pos, MoveList moves, int[] scores) {
         for (int i = 0; i < moves.size; i++) {
             int move = moves.moves[i];
             int flag = Move.flag(move);
@@ -286,9 +354,8 @@ public final class Search {
                 score = victim * 16 - attacker;
             }
             if ((flag & 8) != 0) score += 100;
-            s[i] = score;
+            scores[i] = score;
         }
-        return s;
     }
 
     private void selectNext(MoveList moves, int[] scores, int i) {
@@ -303,6 +370,16 @@ public final class Search {
             int ts = scores[i];
             scores[i] = scores[best];
             scores[best] = ts;
+        }
+    }
+
+    /** Tracks the best and second-best root-move scores seen this iteration (ply 0 only). */
+    private void updateRootMargin(int score) {
+        if (score > rootBestScore) {
+            rootSecondBestScore = rootBestScore;
+            rootBestScore = score;
+        } else if (score > rootSecondBestScore) {
+            rootSecondBestScore = score;
         }
     }
 
