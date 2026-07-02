@@ -96,51 +96,69 @@
   "hotPaths": [
     {
       "path": "src\\main\\java\\engine\\search\\Search.java",
-      "accessCount": 192,
-      "lastAccessed": 1782985223237,
+      "accessCount": 252,
+      "lastAccessed": 1783007152722,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\eval\\Evaluator.java",
-      "accessCount": 35,
-      "lastAccessed": 1782989324719,
+      "accessCount": 55,
+      "lastAccessed": 1783007077721,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\uci\\Uci.java",
-      "accessCount": 33,
-      "lastAccessed": 1782981024366,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\search\\LazySmpSearch.java",
-      "accessCount": 22,
-      "lastAccessed": 1782940964418,
+      "accessCount": 38,
+      "lastAccessed": 1782999571681,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\board\\Position.java",
-      "accessCount": 21,
-      "lastAccessed": 1782984384981,
+      "accessCount": 23,
+      "lastAccessed": 1782992913243,
+      "type": "file"
+    },
+    {
+      "path": "src\\main\\java\\engine\\search\\LazySmpSearch.java",
+      "accessCount": 23,
+      "lastAccessed": 1782998279815,
       "type": "file"
     },
     {
       "path": "src\\test\\java\\engine\\search\\SearchPhase2Test.java",
-      "accessCount": 16,
-      "lastAccessed": 1782979945562,
+      "accessCount": 22,
+      "lastAccessed": 1783001634641,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\board\\MoveGenerator.java",
-      "accessCount": 12,
-      "lastAccessed": 1782983889083,
+      "accessCount": 14,
+      "lastAccessed": 1782992891045,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\board\\Move.java",
-      "accessCount": 11,
-      "lastAccessed": 1782936033314,
+      "accessCount": 12,
+      "lastAccessed": 1782992649405,
       "type": "file"
+    },
+    {
+      "path": "src\\main\\java\\engine\\search\\HandcraftedEvaluator.java",
+      "accessCount": 10,
+      "lastAccessed": 1782998295502,
+      "type": "file"
+    },
+    {
+      "path": "src\\main\\java\\engine\\search\\TranspositionTable.java",
+      "accessCount": 10,
+      "lastAccessed": 1783000601397,
+      "type": "file"
+    },
+    {
+      "path": "src",
+      "accessCount": 10,
+      "lastAccessed": 1783000841609,
+      "type": "directory"
     },
     {
       "path": "src\\main\\java\\engine\\tune\\CorpusReader.java",
@@ -149,21 +167,21 @@
       "type": "file"
     },
     {
-      "path": "src\\main\\java\\engine\\search\\HandcraftedEvaluator.java",
+      "path": "src\\main\\java\\engine\\board\\Attacks.java",
       "accessCount": 9,
-      "lastAccessed": 1782981971791,
+      "lastAccessed": 1782994484267,
       "type": "file"
-    },
-    {
-      "path": "src",
-      "accessCount": 9,
-      "lastAccessed": 1782983917036,
-      "type": "directory"
     },
     {
       "path": "src\\main\\java\\engine\\tune\\Tuner.java",
       "accessCount": 8,
       "lastAccessed": 1782932942626,
+      "type": "file"
+    },
+    {
+      "path": "src\\test\\java\\engine\\search\\TranspositionTableConcurrencyTest.java",
+      "accessCount": 8,
+      "lastAccessed": 1783000867030,
       "type": "file"
     },
     {
@@ -173,39 +191,27 @@
       "type": "file"
     },
     {
-      "path": "src\\test\\java\\engine\\search\\TranspositionTableConcurrencyTest.java",
-      "accessCount": 6,
-      "lastAccessed": 1782935317635,
-      "type": "file"
-    },
-    {
       "path": "src\\test\\java\\engine\\search\\SeeTest.java",
       "accessCount": 6,
       "lastAccessed": 1782936017187,
       "type": "file"
     },
     {
-      "path": "src\\main\\java\\engine\\search\\TranspositionTable.java",
+      "path": "src\\main\\java\\engine\\board\\Piece.java",
       "accessCount": 6,
-      "lastAccessed": 1782936232686,
+      "lastAccessed": 1782992649455,
+      "type": "file"
+    },
+    {
+      "path": "src\\main\\java\\engine\\tools\\MatchRunner.java",
+      "accessCount": 6,
+      "lastAccessed": 1782998908056,
       "type": "file"
     },
     {
       "path": "src\\test\\java\\engine\\tune\\TunerTest.java",
       "accessCount": 5,
       "lastAccessed": 1782932946850,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\tools\\MatchRunner.java",
-      "accessCount": 5,
-      "lastAccessed": 1782935236349,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\board\\Piece.java",
-      "accessCount": 5,
-      "lastAccessed": 1782936242780,
       "type": "file"
     },
     {
@@ -233,9 +239,15 @@
       "type": "file"
     },
     {
-      "path": "src\\main\\java\\engine\\board\\Attacks.java",
-      "accessCount": 3,
-      "lastAccessed": 1782916829695,
+      "path": "src\\test\\java\\engine\\search\\SearchTest.java",
+      "accessCount": 4,
+      "lastAccessed": 1782998301390,
+      "type": "directory"
+    },
+    {
+      "path": "src\\test\\java\\engine\\search\\TimeManagementTest.java",
+      "accessCount": 4,
+      "lastAccessed": 1783006935731,
       "type": "file"
     },
     {
@@ -245,22 +257,10 @@
       "type": "directory"
     },
     {
-      "path": "src\\test\\java\\engine\\search\\TimeManagementTest.java",
-      "accessCount": 3,
-      "lastAccessed": 1782935697747,
-      "type": "file"
-    },
-    {
       "path": "src\\test\\java\\engine\\uci\\UciProtocolTest.java",
       "accessCount": 3,
       "lastAccessed": 1782936009482,
       "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\search\\SearchTest.java",
-      "accessCount": 3,
-      "lastAccessed": 1782985264207,
-      "type": "directory"
     },
     {
       "path": "lichess-bot\\wiki\\How-to-Run-lichess‐bot.md",
@@ -317,6 +317,24 @@
       "type": "file"
     },
     {
+      "path": "src\\main\\java\\engine\\board\\Zobrist.java",
+      "accessCount": 2,
+      "lastAccessed": 1782992646004,
+      "type": "file"
+    },
+    {
+      "path": "src\\test\\java\\engine\\board\\MakeUnmakeTest.java",
+      "accessCount": 2,
+      "lastAccessed": 1782992654525,
+      "type": "file"
+    },
+    {
+      "path": "src\\test\\java\\engine\\search\\HandcraftedEvaluatorTest.java",
+      "accessCount": 2,
+      "lastAccessed": 1783001178358,
+      "type": "file"
+    },
+    {
       "path": "lichess-bot\\README.md",
       "accessCount": 1,
       "lastAccessed": 1782909043673,
@@ -329,34 +347,16 @@
       "type": "directory"
     },
     {
-      "path": "src\\test\\java\\engine\\board\\MakeUnmakeTest.java",
-      "accessCount": 1,
-      "lastAccessed": 1782915869627,
-      "type": "file"
-    },
-    {
       "path": "src\\main\\java\\engine",
       "accessCount": 1,
       "lastAccessed": 1782916292552,
       "type": "directory"
     },
     {
-      "path": "src\\main\\java\\engine\\board\\Zobrist.java",
-      "accessCount": 1,
-      "lastAccessed": 1782916829988,
-      "type": "file"
-    },
-    {
       "path": "lichess-bot\\lib\\engine_wrapper.py",
       "accessCount": 1,
       "lastAccessed": 1782922254430,
       "type": "directory"
-    },
-    {
-      "path": "src\\test\\java\\engine\\search\\HandcraftedEvaluatorTest.java",
-      "accessCount": 1,
-      "lastAccessed": 1782925131870,
-      "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\eval\\package-info.java",

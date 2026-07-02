@@ -24,6 +24,14 @@ public final class Evaluator {
     private static final int[] MG_VALUE = {82, 337, 365, 477, 1025, 0};
     private static final int[] EG_VALUE = {94, 281, 297, 512, 936, 0};
 
+    // Tempo: a small flat bonus for the side to move, reflecting the standing initiative of
+    // having the move. Beyond a genuine (if small) positional truth, it damps the odd/even
+    // evaluation oscillation between plies that otherwise churns the aspiration window and
+    // destabilizes node counts between iterations. Added to the side-to-move-relative score,
+    // so it is deliberately NOT color-symmetric the way the board terms are (see
+    // EvalSymmetryTest, which subtracts it out before checking antisymmetry).
+    public static final int TEMPO = 15;
+
     // --- pawn structure / king safety / mobility weights ---
     // Every term below is a genuine MG/EG *pair* (not a single flat value split by eye) --
     // doubled pawns bite harder once there are no piece-play compensations left to offset
@@ -56,10 +64,53 @@ public final class Evaluator {
     private static final int SEMI_OPEN_FILE_MG = 10;
     private static final int SEMI_OPEN_FILE_EG = 3;
 
+    // King-attack ("attack units"): each enemy piece bearing on the squares around a king
+    // contributes units weighted by piece type and by how many king-zone squares it hits; the
+    // total is squared (danger grows super-linearly as attackers pile up) into a penalty. This
+    // is what lets the engine value a building attack BEFORE tactics force it into qsearch,
+    // rather than reading sharp middlegames as flat. Requires >= 2 attackers (a lone piece near
+    // the king is not a real threat) and is almost purely a middlegame concern (small eg).
+    private static final int[] KING_ATTACK_WEIGHT = {0, 2, 2, 3, 5, 0}; // by piece TYPE
+    private static final int KING_ATTACK_DIVISOR = 6;   // penalty = min(units*units/DIVISOR, CAP)
+    private static final int KING_ATTACK_CAP = 400;     // ceiling so one lopsided node can't dominate
+    private static final int KING_ATTACK_EG_SHIFT = 4;  // eg penalty = mg penalty >> this (small)
+
+    // Space: safe central squares (files c-f) in one's own half, not attacked by enemy pawns,
+    // scored super-linearly in the number of pieces still on the board -- the dominant factor
+    // in closed middlegames, which the engine was previously blind to. Squares sheltered behind
+    // an own pawn count extra. Purely a middlegame concept (no eg component): once pieces trade
+    // off, space no longer translates into attacking potential.
+    private static final long SPACE_MASK_WHITE = (0x3CL << 8) | (0x3CL << 16) | (0x3CL << 24);
+    private static final long SPACE_MASK_BLACK = (0x3CL << 32) | (0x3CL << 40) | (0x3CL << 48);
+    private static final int SPACE_DIVISOR = 16; // score = (safe + behind) * pieces^2 / DIVISOR
+
+    // Bad bishop: a bishop hemmed in by its own pawns fixed on its square color is a lasting
+    // structural liability, worse in the endgame where it can't be traded off into activity.
+    private static final long LIGHT_SQUARES = 0x55AA55AA55AA55AAL;
+    private static final int BAD_BISHOP_MG = 3; // per own pawn on the bishop's square color
+    private static final int BAD_BISHOP_EG = 5;
+
     // Mobility by piece TYPE: rooks/queens gain relative value in the endgame (open lines
     // decide races once material thins out), while knights/bishops taper down slightly.
     private static final int[] MOBILITY_MG = {0, 4, 4, 3, 1, 0};
     private static final int[] MOBILITY_EG = {0, 3, 3, 4, 2, 0};
+
+    // Passed-pawn king proximity (endgame only): a passer's value in the endgame depends
+    // heavily on which king can reach its promotion square first, which pure rank scaling
+    // ignores. Rewards the friendly king being close and the enemy king being far, weighted
+    // by how advanced the passer already is.
+    private static final int PASSER_KING_EG = 5;
+
+    // Connected/phalanx pawn bonus and backward-pawn penalty (small, standard mg/eg pairs).
+    private static final int CONNECTED_MG = 8;
+    private static final int CONNECTED_EG = 6;
+    private static final int BACKWARD_MG = 10;
+    private static final int BACKWARD_EG = 14;
+
+    // Endgame scale factor (out of SCALE_MAX): the eg score is multiplied by this before the
+    // phase blend, to reflect that some material configurations are far more drawish than raw
+    // material suggests -- opposite-colored bishops halve, dead-drawn minor endings zero out.
+    private static final int SCALE_MAX = 16;
 
     // Weighted-mobility "Ambition" top-ups: on top of the flat per-square MOBILITY_MG/EG
     // rate above, a mobility square gets an extra bonus when it represents genuine central/
@@ -182,16 +233,75 @@ public final class Evaluator {
         mg += outposts[0];
         eg += outposts[1];
 
+        int[] kingAttack = evalKingAttack(pos);
+        mg += kingAttack[0];
+        eg += kingAttack[1];
+
+        int[] space = evalSpace(pos);
+        mg += space[0];
+        eg += space[1];
+
+        int[] badBishop = evalBadBishop(pos);
+        mg += badBishop[0];
+        eg += badBishop[1];
+
         // Linear interpolation core: every term above (material, PST, bishop pair, rook
         // activity, pawn structure, mobility, king safety, outposts) has now fed both an mg
         // and an eg contribution into the same two accumulators, so this single blend is the
         // only place game phase is applied -- nothing bypasses it and reaches the final score
         // unscaled.
+        // Drawishness scaling: damp the endgame component for material configurations that are
+        // far more drawish than raw material implies (opposite-colored bishops, dead-drawn
+        // minor endings). Applied to eg before the blend, so it fades out with the endgame
+        // weight itself and never touches middlegame scoring. Symmetric: the scale depends only
+        // on (color-symmetric) material, so a mirrored position scales identically.
+        int scaledEg = eg * scaleFactor(pos) / SCALE_MAX;
+
         int mgPhase = Math.min(phase, PHASE_MAX);
         int egPhase = PHASE_MAX - mgPhase;
-        int score = (mg * mgPhase + eg * egPhase) / PHASE_MAX;
+        int score = (mg * mgPhase + scaledEg * egPhase) / PHASE_MAX;
 
-        return pos.sideToMove() == WHITE ? score : -score;
+        int stmScore = pos.sideToMove() == WHITE ? score : -score;
+        return stmScore + TEMPO;
+    }
+
+    /**
+     * Endgame scale factor out of {@link #SCALE_MAX}. Conservative by design -- only clearly
+     * drawish configurations are damped, so a genuinely winning endgame is never scaled down:
+     * opposite-colored bishops (one bishop each on opposite square colors, no other pieces)
+     * halve the eg score, and a pawnless ending with at most a single minor per side (which
+     * cannot force mate) zeroes it out.
+     */
+    private static int scaleFactor(Position pos) {
+        long wp = pos.pieces(index(WHITE, PAWN));
+        long bp = pos.pieces(index(BLACK, PAWN));
+        long wn = pos.pieces(index(WHITE, KNIGHT)), bn = pos.pieces(index(BLACK, KNIGHT));
+        long wb = pos.pieces(index(WHITE, BISHOP)), bb = pos.pieces(index(BLACK, BISHOP));
+        long wr = pos.pieces(index(WHITE, ROOK)), br = pos.pieces(index(BLACK, ROOK));
+        long wq = pos.pieces(index(WHITE, QUEEN)), bq = pos.pieces(index(BLACK, QUEEN));
+
+        // Opposite-colored bishops with no other pieces: notoriously drawish even a pawn or two up.
+        if ((wn | bn | wr | br | wq | bq) == 0
+                && Long.bitCount(wb) == 1 && Long.bitCount(bb) == 1) {
+            boolean wLight = isLightSquare(Long.numberOfTrailingZeros(wb));
+            boolean bLight = isLightSquare(Long.numberOfTrailingZeros(bb));
+            if (wLight != bLight) return SCALE_MAX / 2;
+        }
+
+        // Pawnless with at most a single minor on the board TOTAL (KvK, KNvK, KBvK): no mate is
+        // possible, a dead draw. Note this is one minor across both sides, not one per side --
+        // KNvKN and the like remain fully scored so the engine still prefers better placement
+        // and can play on for the opponent's error rather than treating it as a settled draw.
+        if ((wp | bp) == 0 && (wr | br | wq | bq) == 0) {
+            int minors = Long.bitCount(wn) + Long.bitCount(wb)
+                    + Long.bitCount(bn) + Long.bitCount(bb);
+            if (minors <= 1) return 0;
+        }
+        return SCALE_MAX;
+    }
+
+    private static boolean isLightSquare(int sq) {
+        return (((sq >> 3) + (sq & 7)) & 1) == 1;
     }
 
     // --- pawn structure (tapered, white-relative) ---
@@ -199,12 +309,15 @@ public final class Evaluator {
     private static int[] evalPawns(Position pos) {
         long wp = pos.pieces(index(WHITE, PAWN));
         long bp = pos.pieces(index(BLACK, PAWN));
-        int[] w = pawnScore(wp, bp, WHITE);
-        int[] b = pawnScore(bp, wp, BLACK);
+        int wk = pos.kingSquare(WHITE);
+        int bk = pos.kingSquare(BLACK);
+        // Own king / enemy king passed to each side for the passer-proximity term.
+        int[] w = pawnScore(wp, bp, WHITE, wk, bk);
+        int[] b = pawnScore(bp, wp, BLACK, bk, wk);
         return new int[] {w[0] - b[0], w[1] - b[1]};
     }
 
-    private static int[] pawnScore(long own, long enemy, int color) {
+    private static int[] pawnScore(long own, long enemy, int color, int ownKing, int enemyKing) {
         int mg = 0, eg = 0;
         for (int f = 0; f < 8; f++) {
             int cnt = Long.bitCount(own & FILES[f]);
@@ -217,18 +330,180 @@ public final class Evaluator {
                 eg -= ISOLATED_EG * cnt;
             }
         }
+        long enemyPawnAtt = pawnAttacks(enemy, 1 - color);
         long b = own;
         while (b != 0) {
             int sq = Long.numberOfTrailingZeros(b);
             b &= b - 1;
+            int f = sq & 7;
+            int rel = color == WHITE ? (sq >> 3) : 7 - (sq >> 3);
+
             long mask = color == WHITE ? WHITE_PASSED[sq] : BLACK_PASSED[sq];
             if ((enemy & mask) == 0) {
-                int rel = color == WHITE ? (sq >> 3) : 7 - (sq >> 3);
                 mg += PASSED_MG[rel];
                 eg += PASSED_EG[rel];
+                // Endgame king proximity to the promotion square, weighted by advancement.
+                int promoSq = color == WHITE ? (56 + f) : f;
+                int prox = chebyshev(enemyKing, promoSq) - chebyshev(ownKing, promoSq);
+                eg += PASSER_KING_EG * prox * rel / 6;
+            }
+
+            // Connected/phalanx: a friendly pawn beside this one (same rank) or defending it
+            // (one rank back on an adjacent file) makes a mutually-supporting pawn chain.
+            long adjFiles = ADJ[f];
+            long sameRank = adjFiles & rankMask(sq >> 3);
+            long behindRank = color == WHITE ? rankMask((sq >> 3) - 1) : rankMask((sq >> 3) + 1);
+            if ((own & sameRank) != 0 || (own & adjFiles & behindRank) != 0) {
+                mg += CONNECTED_MG;
+                eg += CONNECTED_EG;
+            }
+
+            // Backward: no friendly pawn on adjacent files at or behind this pawn's rank (so it
+            // can't be supported from behind), and the square in front is controlled by an
+            // enemy pawn (so it can't safely advance) -- a lasting weakness.
+            long supportZone = color == WHITE ? (adjFiles & atOrBelow(sq >> 3))
+                                              : (adjFiles & atOrAbove(sq >> 3));
+            int stopSq = color == WHITE ? sq + 8 : sq - 8;
+            boolean stopAttacked = stopSq >= 0 && stopSq < 64
+                    && (enemyPawnAtt & (1L << stopSq)) != 0;
+            if ((own & supportZone) == 0 && stopAttacked) {
+                mg -= BACKWARD_MG;
+                eg -= BACKWARD_EG;
             }
         }
         return new int[] {mg, eg};
+    }
+
+    private static long rankMask(int rank) {
+        return rank >= 0 && rank < 8 ? (0xFFL << (rank * 8)) : 0L;
+    }
+
+    /** All ranks at or below (numerically <=) {@code rank}, i.e. rank and everything toward rank 1. */
+    private static long atOrBelow(int rank) {
+        long m = 0L;
+        for (int r = 0; r <= rank && r < 8; r++) m |= 0xFFL << (r * 8);
+        return m;
+    }
+
+    /** All ranks at or above (numerically >=) {@code rank}, i.e. rank and everything toward rank 8. */
+    private static long atOrAbove(int rank) {
+        long m = 0L;
+        for (int r = rank; r < 8; r++) if (r >= 0) m |= 0xFFL << (r * 8);
+        return m;
+    }
+
+    /** Chebyshev (king-move) distance between two squares. */
+    private static int chebyshev(int a, int b) {
+        int df = Math.abs((a & 7) - (b & 7));
+        int dr = Math.abs((a >> 3) - (b >> 3));
+        return Math.max(df, dr);
+    }
+
+    // --- king attack / danger (tapered, white-relative) ---
+
+    private static int[] evalKingAttack(Position pos) {
+        // A king in danger is a penalty to ITS side, so the enemy's danger is the friendly
+        // side's gain: white-relative term = (danger to black king) - (danger to white king).
+        int[] wDanger = kingDanger(pos, WHITE);
+        int[] bDanger = kingDanger(pos, BLACK);
+        return new int[] {bDanger[0] - wDanger[0], bDanger[1] - wDanger[1]};
+    }
+
+    /** Attack-unit danger (>= 0) to {@code kingColor}'s king from the opposing pieces. */
+    private static int[] kingDanger(Position pos, int kingColor) {
+        int ksq = pos.kingSquare(kingColor);
+        long zone = Attacks.KING[ksq] | (1L << ksq);
+        int enemy = 1 - kingColor;
+        long occ = pos.occupied();
+        int units = 0, attackers = 0;
+
+        long n = pos.pieces(index(enemy, KNIGHT));
+        while (n != 0) {
+            int sq = Long.numberOfTrailingZeros(n);
+            n &= n - 1;
+            int c = Long.bitCount(Attacks.KNIGHT[sq] & zone);
+            if (c > 0) { units += KING_ATTACK_WEIGHT[KNIGHT] * c; attackers++; }
+        }
+        long b = pos.pieces(index(enemy, BISHOP));
+        while (b != 0) {
+            int sq = Long.numberOfTrailingZeros(b);
+            b &= b - 1;
+            int c = Long.bitCount(Attacks.bishop(sq, occ) & zone);
+            if (c > 0) { units += KING_ATTACK_WEIGHT[BISHOP] * c; attackers++; }
+        }
+        long r = pos.pieces(index(enemy, ROOK));
+        while (r != 0) {
+            int sq = Long.numberOfTrailingZeros(r);
+            r &= r - 1;
+            int c = Long.bitCount(Attacks.rook(sq, occ) & zone);
+            if (c > 0) { units += KING_ATTACK_WEIGHT[ROOK] * c; attackers++; }
+        }
+        long q = pos.pieces(index(enemy, QUEEN));
+        while (q != 0) {
+            int sq = Long.numberOfTrailingZeros(q);
+            q &= q - 1;
+            int c = Long.bitCount(Attacks.queen(sq, occ) & zone);
+            if (c > 0) { units += KING_ATTACK_WEIGHT[QUEEN] * c; attackers++; }
+        }
+
+        // A lone attacker near the king isn't a real threat; danger is only credited once at
+        // least two enemy pieces bear on the zone, and grows super-linearly from there.
+        if (attackers < 2) return new int[] {0, 0};
+        int penalty = Math.min(units * units / KING_ATTACK_DIVISOR, KING_ATTACK_CAP);
+        return new int[] {penalty, penalty >> KING_ATTACK_EG_SHIFT};
+    }
+
+    // --- space (mg only, white-relative) ---
+
+    private static int[] evalSpace(Position pos) {
+        int w = spaceScore(pos, WHITE);
+        int b = spaceScore(pos, BLACK);
+        return new int[] {w - b, 0}; // mg only
+    }
+
+    private static int spaceScore(Position pos, int color) {
+        long ownPawns = pos.pieces(index(color, PAWN));
+        long enemyPawns = pos.pieces(index(1 - color, PAWN));
+        long enemyPawnAtt = pawnAttacks(enemyPawns, 1 - color);
+        long areaMask = color == WHITE ? SPACE_MASK_WHITE : SPACE_MASK_BLACK;
+
+        // Safe = central own-half squares that aren't own pawns and aren't hit by enemy pawns.
+        long safe = areaMask & ~ownPawns & ~enemyPawnAtt;
+        // "Behind a pawn": one or two ranks in front (from this side's view) sits an own pawn --
+        // such squares are extra-sheltered space. Shift own pawns back toward our side and mask.
+        long behind = color == WHITE
+                ? ((ownPawns >>> 8) | (ownPawns >>> 16))
+                : ((ownPawns << 8) | (ownPawns << 16));
+        int bonus = Long.bitCount(safe) + Long.bitCount(safe & behind);
+
+        int pieces = Long.bitCount(pos.pieces(index(color, KNIGHT)))
+                + Long.bitCount(pos.pieces(index(color, BISHOP)))
+                + Long.bitCount(pos.pieces(index(color, ROOK)))
+                + Long.bitCount(pos.pieces(index(color, QUEEN)));
+        // Super-linear in piece count: space matters far more with a full board than a thin one.
+        return bonus * pieces * pieces / SPACE_DIVISOR;
+    }
+
+    // --- bad bishop (tapered, white-relative) ---
+
+    private static int[] evalBadBishop(Position pos) {
+        int[] w = badBishopPenalty(pos, WHITE);
+        int[] b = badBishopPenalty(pos, BLACK);
+        // A bad bishop hurts its owner, so the enemy's bad bishop is our gain.
+        return new int[] {b[0] - w[0], b[1] - w[1]};
+    }
+
+    private static int[] badBishopPenalty(Position pos, int color) {
+        long bishops = pos.pieces(index(color, BISHOP));
+        if (bishops == 0) return new int[] {0, 0};
+        long ownPawns = pos.pieces(index(color, PAWN));
+        int lightPawns = Long.bitCount(ownPawns & LIGHT_SQUARES);
+        int darkPawns = Long.bitCount(ownPawns & ~LIGHT_SQUARES);
+        int lightBishops = Long.bitCount(bishops & LIGHT_SQUARES);
+        int darkBishops = Long.bitCount(bishops & ~LIGHT_SQUARES);
+        // Each bishop is dragged down by the own pawns fixed on its own square color.
+        int units = lightBishops * lightPawns + darkBishops * darkPawns;
+        return new int[] {units * BAD_BISHOP_MG, units * BAD_BISHOP_EG};
     }
 
     // --- weighted mobility (tapered, white-relative) ---
@@ -242,25 +517,41 @@ public final class Evaluator {
 
     private static int[] evalMobility(Position pos) {
         long occ = pos.occupied();
-        long allPawns = pos.pieces(index(WHITE, PAWN)) | pos.pieces(index(BLACK, PAWN));
+        long wp = pos.pieces(index(WHITE, PAWN));
+        long bp = pos.pieces(index(BLACK, PAWN));
+        long allPawns = wp | bp;
         long openFiles = 0L;
         for (int f = 0; f < 8; f++) {
             if ((allPawns & FILES[f]) == 0) openFiles |= FILES[f];
         }
-        int[] w = mobilityScore(pos, WHITE, occ, openFiles);
-        int[] b = mobilityScore(pos, BLACK, occ, openFiles);
+        long whitePawnAtt = pawnAttacks(wp, WHITE);
+        long blackPawnAtt = pawnAttacks(bp, BLACK);
+        // A square attacked by an enemy pawn is not real mobility -- a piece there is just
+        // hanging to the pawn -- so it is excluded from each side's mobility area.
+        int[] w = mobilityScore(pos, WHITE, occ, openFiles, blackPawnAtt);
+        int[] b = mobilityScore(pos, BLACK, occ, openFiles, whitePawnAtt);
         return new int[] {w[0] - b[0], w[1] - b[1]};
     }
 
-    private static int[] mobilityScore(Position pos, int color, long occ, long openFiles) {
+    /** All squares attacked by {@code color}'s pawns (file-wrap masked). */
+    private static long pawnAttacks(long pawns, int color) {
+        if (color == WHITE) {
+            return ((pawns & ~Attacks.FILE_A) << 7) | ((pawns & ~Attacks.FILE_H) << 9);
+        }
+        return ((pawns & ~Attacks.FILE_A) >>> 9) | ((pawns & ~Attacks.FILE_H) >>> 7);
+    }
+
+    private static int[] mobilityScore(Position pos, int color, long occ, long openFiles,
+                                       long enemyPawnAtt) {
         long own = pos.occupied(color);
+        long area = ~own & ~enemyPawnAtt; // exclude own pieces and enemy-pawn-controlled squares
         int mg = 0, eg = 0;
 
         long n = pos.pieces(index(color, KNIGHT));
         while (n != 0) {
             int sq = Long.numberOfTrailingZeros(n);
             n &= n - 1;
-            long dest = Attacks.KNIGHT[sq] & ~own;
+            long dest = Attacks.KNIGHT[sq] & area;
             int cnt = Long.bitCount(dest);
             int centerCnt = Long.bitCount(dest & CENTER_SQUARES);
             mg += MOBILITY_MG[KNIGHT] * cnt + KNIGHT_CENTER_MOBILITY_MG * centerCnt;
@@ -270,7 +561,7 @@ public final class Evaluator {
         while (bsh != 0) {
             int sq = Long.numberOfTrailingZeros(bsh);
             bsh &= bsh - 1;
-            long dest = Attacks.bishop(sq, occ) & ~own;
+            long dest = Attacks.bishop(sq, occ) & area;
             int cnt = Long.bitCount(dest);
             int centerCnt = Long.bitCount(dest & CENTER_SQUARES);
             mg += MOBILITY_MG[BISHOP] * cnt + BISHOP_CENTER_MOBILITY_MG * centerCnt;
@@ -280,7 +571,7 @@ public final class Evaluator {
         while (r != 0) {
             int sq = Long.numberOfTrailingZeros(r);
             r &= r - 1;
-            long dest = Attacks.rook(sq, occ) & ~own;
+            long dest = Attacks.rook(sq, occ) & area;
             int cnt = Long.bitCount(dest);
             int openCnt = Long.bitCount(dest & openFiles);
             mg += MOBILITY_MG[ROOK] * cnt + ROOK_OPEN_FILE_MOBILITY_MG * openCnt;
@@ -290,7 +581,7 @@ public final class Evaluator {
         while (q != 0) {
             int sq = Long.numberOfTrailingZeros(q);
             q &= q - 1;
-            long dest = Attacks.queen(sq, occ) & ~own;
+            long dest = Attacks.queen(sq, occ) & area;
             int cnt = Long.bitCount(dest);
             int openCnt = Long.bitCount(dest & openFiles);
             mg += MOBILITY_MG[QUEEN] * cnt + QUEEN_OPEN_FILE_MOBILITY_MG * openCnt;

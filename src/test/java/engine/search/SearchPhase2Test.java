@@ -64,6 +64,9 @@ class SearchPhase2Test {
         s.useRfp = false;
         s.useNullMove = false;
         s.useFutility = false;
+        s.useLmp = false;
+        s.useSeePruning = false;
+        s.useIir = false;
         return s;
     }
 
@@ -101,6 +104,10 @@ class SearchPhase2Test {
         withTt.useRfp = false;
         withTt.useNullMove = false;
         withTt.useFutility = false;
+        withTt.useLmp = false;
+        withTt.useSeePruning = false;
+        withTt.useIir = false;
+        withTt.useQsTt = false;
         withTt.search(p1, depth);
 
         Position p2 = Position.fromFen(fen);
@@ -111,6 +118,10 @@ class SearchPhase2Test {
         noTt.useRfp = false;
         noTt.useNullMove = false;
         noTt.useFutility = false;
+        noTt.useLmp = false;
+        noTt.useSeePruning = false;
+        noTt.useIir = false;
+        noTt.useQsTt = false;
         noTt.search(p2, depth);
 
         int diff = Math.abs(noTt.bestScore - withTt.bestScore);
@@ -170,12 +181,14 @@ class SearchPhase2Test {
     void transpositionTableStoreProbeRoundTrip() {
         TranspositionTable tt = new TranspositionTable(1);
         long key = 0x123456789abcdefL;
-        tt.store(key, 7, 123, TranspositionTable.FLAG_EXACT, Move.make(12, 28, Move.QUIET));
+        tt.store(key, 7, 123, TranspositionTable.FLAG_EXACT, Move.make(12, 28, Move.QUIET), -45, 3);
 
         long entry = tt.probe(key);
         assertTrue(TranspositionTable.flagOf(entry) != TranspositionTable.FLAG_NONE, "stored key should be found");
         assertEquals(7, TranspositionTable.depthOf(entry));
         assertEquals(123, TranspositionTable.scoreOf(entry));
+        assertEquals(-45, TranspositionTable.evalOf(entry));
+        assertEquals(3, TranspositionTable.generationOf(entry));
         assertEquals(TranspositionTable.FLAG_EXACT, TranspositionTable.flagOf(entry));
         assertEquals(Move.make(12, 28, Move.QUIET), TranspositionTable.moveOf(entry));
 

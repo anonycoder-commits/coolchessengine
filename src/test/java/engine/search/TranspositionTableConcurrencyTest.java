@@ -67,7 +67,9 @@ class TranspositionTableConcurrencyTest {
                         // Tag the move field with the key index so a returned hit can be
                         // checked against the key it was actually probed for.
                         int move = ki | (ki << 6);
-                        tt.store(key, depth, score, flag, move);
+                        int eval = rnd.nextInt(2001) - 1000;
+                        int generation = rnd.nextInt(64);
+                        tt.store(key, depth, score, flag, move, eval, generation);
 
                         long entry = tt.probe(key);
                         if (TranspositionTable.flagOf(entry) == TranspositionTable.FLAG_NONE) continue;

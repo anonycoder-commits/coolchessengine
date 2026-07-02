@@ -14,8 +14,12 @@ dependencies {
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
+    // JDK 19+ required for Long.compress/Long.expand (hardware PEXT/PDEP on x86-64 BMI2),
+    // used by the PEXT sliding-attack mode in engine.board.Attacks. The lichess-bot
+    // consumer (see copyToLichessBot) must launch MyEngine.jar with a JRE >= this version.
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
 }
 
 application {

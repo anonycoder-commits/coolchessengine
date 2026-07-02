@@ -47,16 +47,20 @@ public final class Perft {
         String fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         int depth = 6;
         boolean divide = false;
+        int warmup = 0;
+        int runs = 1;
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "-fen": fen = args[++i]; break;
                 case "-depth": depth = Integer.parseInt(args[++i]); break;
                 case "-divide": divide = true; break;
+                case "-warmup": warmup = Integer.parseInt(args[++i]); break;
+                case "-runs": runs = Integer.parseInt(args[++i]); break;
                 default: break;
             }
         }
         Position pos = Position.fromFen(fen);
-        long start = System.nanoTime();
+
         if (divide) {
             long total = 0;
             for (DivideEntry e : divide(pos, depth)) {
@@ -65,12 +69,38 @@ public final class Perft {
             }
             System.out.println();
             System.out.println("Nodes: " + total);
-        } else {
-            long nodes = perft(pos, depth);
+            return;
+        }
+
+        // Echo the active sliding-attack mode so benchmark logs are self-describing without
+        // needing to separately record which -Dengine.attacks= value produced them.
+        String mode = System.getProperty("engine.attacks", "magic");
+        long nodes = -1;
+
+        for (int i = 0; i < warmup; i++) {
+            nodes = perft(pos, depth);
+        }
+
+        double[] npsPerRun = new double[runs];
+        for (int i = 0; i < runs; i++) {
+            long start = System.nanoTime();
+            nodes = perft(pos, depth);
             double secs = (System.nanoTime() - start) / 1e9;
-            System.out.println("perft(" + depth + ") = " + nodes
-                    + "  (" + String.format("%.2f", secs) + "s, "
-                    + String.format("%.0f", nodes / Math.max(secs, 1e-9)) + " nps)");
+            double nps = nodes / Math.max(secs, 1e-9);
+            npsPerRun[i] = nps;
+            System.out.println("perft(" + depth + ") [" + mode + "] run " + (i + 1) + "/" + runs
+                    + " = " + nodes + "  (" + String.format("%.2f", secs) + "s, "
+                    + String.format("%.0f", nps) + " nps)");
+        }
+
+        if (runs > 1) {
+            double[] sorted = npsPerRun.clone();
+            java.util.Arrays.sort(sorted);
+            double median = sorted.length % 2 == 1
+                    ? sorted[sorted.length / 2]
+                    : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2.0;
+            System.out.println("[" + mode + "] median nps over " + runs + " runs: "
+                    + String.format("%.0f", median));
         }
     }
 }

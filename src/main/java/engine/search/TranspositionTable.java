@@ -95,7 +95,10 @@ public final class TranspositionTable {
         return MISS;
     }
 
-    public void store(long key, int depth, int score, int flag, int move) {
+    /** Sentinel stored in the eval field when a store carries no static eval. */
+    public static final int NO_EVAL = 32767;
+
+    public void store(long key, int depth, int score, int flag, int move, int eval, int generation) {
         int b = base(key);
         int deep = b;       // depth-preferred slot
         int always = b + 1; // always-replace slot
@@ -105,34 +108,48 @@ public final class TranspositionTable {
         boolean deepEmpty = flagOf(deepData) == FLAG_NONE;
         boolean deepSameKey = !deepEmpty && (deepXor ^ deepData) == key;
 
-        int target = (deepEmpty || deepSameKey || depth >= depthOf(deepData)) ? deep : always;
+        // Depth-preferred slot is eligible when empty, same key, from an older generation
+        // (stale entries from previous searches yield to fresh ones regardless of depth), or
+        // this store is at least as deep as what's there.
+        boolean deepFromOldGen = !deepEmpty && generationOf(deepData) != generation;
+        int target = (deepEmpty || deepSameKey || deepFromOldGen || depth >= depthOf(deepData))
+                ? deep : always;
 
-        // Preserve a known best move if this store carries none for the same position.
-        // Benign race: another thread may replace `target` between this read and our
-        // write below; worst case we fail to preserve an old move, we never corrupt one.
-        if (move == 0) {
-            long curData = target == deep ? deepData : data.get(target);
-            long curXor = target == deep ? deepXor : xorKeys.get(target);
-            if (flagOf(curData) != FLAG_NONE && (curXor ^ curData) == key) {
-                int oldMove = moveOf(curData);
-                if (oldMove != 0) move = oldMove;
-            }
+        // Preserve a known best move / static eval if this store carries none for the same
+        // position. Benign race: another thread may replace `target` between this read and our
+        // write below; worst case we fail to preserve an old value, we never corrupt one.
+        long curData = target == deep ? deepData : data.get(target);
+        long curXor = target == deep ? deepXor : xorKeys.get(target);
+        boolean curSameKey = flagOf(curData) != FLAG_NONE && (curXor ^ curData) == key;
+        if (move == 0 && curSameKey) {
+            int oldMove = moveOf(curData);
+            if (oldMove != 0) move = oldMove;
+        }
+        if (eval == NO_EVAL && curSameKey) {
+            eval = evalOf(curData); // may still be NO_EVAL; harmless
         }
 
-        long entry = pack(move, score, depth, flag);
+        long entry = pack(move, score, depth, flag, eval, generation);
         data.set(target, entry);
         xorKeys.set(target, key ^ entry);
     }
 
-    private static long pack(int move, int score, int depth, int flag) {
+    // Layout (bits): move[0..15] | score[16..31] | eval[32..47] | depth[48..55] |
+    //                flag[56..57] | generation[58..63].
+    private static long pack(int move, int score, int depth, int flag, int eval, int generation) {
+        int d = Math.max(0, Math.min(127, depth)); // 8-bit unsigned depth; clamp defensively
         return (move & 0xFFFFL)
                 | ((score & 0xFFFFL) << 16)
-                | ((depth & 0xFFFFL) << 32)
-                | ((long) (flag & 0xFFL) << 48);
+                | ((eval & 0xFFFFL) << 32)
+                | ((long) (d & 0xFFL) << 48)
+                | ((long) (flag & 0x3L) << 56)
+                | ((long) (generation & 0x3FL) << 58);
     }
 
     public static int moveOf(long entry) { return (int) (entry & 0xFFFFL); }
     public static int scoreOf(long entry) { return (short) ((entry >>> 16) & 0xFFFFL); }
-    public static int depthOf(long entry) { return (short) ((entry >>> 32) & 0xFFFFL); }
-    public static int flagOf(long entry) { return (int) ((entry >>> 48) & 0xFFL); }
+    public static int evalOf(long entry) { return (short) ((entry >>> 32) & 0xFFFFL); }
+    public static int depthOf(long entry) { return (int) ((entry >>> 48) & 0xFFL); }
+    public static int flagOf(long entry) { return (int) ((entry >>> 56) & 0x3L); }
+    public static int generationOf(long entry) { return (int) ((entry >>> 58) & 0x3FL); }
 }

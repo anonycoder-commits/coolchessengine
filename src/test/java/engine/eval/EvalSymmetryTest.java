@@ -69,17 +69,23 @@ class EvalSymmetryTest {
 
     @Test
     void evalIsColorSymmetric() {
+        // The board terms are antisymmetric, but the flat side-to-move TEMPO bonus is added to
+        // both a position and its mirror (both keep the same side-to-move letter), so it must
+        // be subtracted out before the antisymmetry check: (eval-TEMPO) == -(evalMir-TEMPO).
         for (String fen : FENS) {
             Position pos = Position.fromFen(fen);
             Position mir = Position.fromFen(mirror(fen));
-            assertEquals(Evaluator.evaluate(pos), -Evaluator.evaluate(mir),
-                    "eval not antisymmetric for: " + fen);
+            int e = Evaluator.evaluate(pos) - Evaluator.TEMPO;
+            int em = Evaluator.evaluate(mir) - Evaluator.TEMPO;
+            assertEquals(e, -em, "eval not antisymmetric (net of tempo) for: " + fen);
         }
     }
 
     @Test
     void startposIsBalanced() {
         Position pos = Position.startpos();
-        assertEquals(0, Evaluator.evaluate(pos), "startpos must evaluate to exactly 0");
+        // Board is fully symmetric, so the only remaining term is the side-to-move tempo bonus.
+        assertEquals(Evaluator.TEMPO, Evaluator.evaluate(pos),
+                "startpos must evaluate to exactly the tempo bonus");
     }
 }

@@ -52,6 +52,10 @@ public final class Uci {
     private volatile boolean searching;
 
     public static void main(String[] args) throws IOException {
+        if (args.length > 0 && args[0].equals("bench")) {
+            engine.tools.Bench.run();
+            return;
+        }
         new Uci().run();
     }
 
@@ -100,6 +104,9 @@ public final class Uci {
                 case "stop":
                     search.requestStop();
                     if (smp != null) smp.requestStop();
+                    break;
+                case "bench":
+                    engine.tools.Bench.run();
                     break;
                 case "quit":
                     return;
