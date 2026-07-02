@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"mkdir -p \\\"C:/Users/svjat/dev/chess engine/lichess-bot/engines\\\" && cp \\\"C:/Users/svjat/dev/chess engine/build/libs/chess-engine.jar\\\" \\\"C:/Users/svjat/dev/chess engine/lichess-bot/engines...",
-  "error": "Exit code 1\ncp: cannot stat 'C:/Users/svjat/dev/chess engine/build/libs/chess-engine.jar': No such file or directory",
-  "timestamp": "2026-07-01T10:33:54.801Z",
-  "retry_count": 1
-}

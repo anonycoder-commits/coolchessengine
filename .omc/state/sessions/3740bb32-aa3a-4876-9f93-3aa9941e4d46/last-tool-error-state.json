@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd \\\"C:\\\\Users\\\\svjat\\\\dev\\\\chess engine\\\" && echo \\\"csv:\\\"; git check-ignore -v positions.csv; echo \\\"vscode:\\\"; git check-ignore -v .vscode; echo \\\"vscode file:\\\"; git check-ignore -v .v...",
-  "error": "Exit code 1\ncsv:\nvscode:\nvscode file:",
-  "timestamp": "2026-07-02T11:08:43.872Z",
-  "retry_count": 1
-}

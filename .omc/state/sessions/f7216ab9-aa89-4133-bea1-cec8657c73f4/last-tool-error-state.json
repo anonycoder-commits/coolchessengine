@@ -1,7 +1,0 @@
-{
-  "tool_name": "mcp__plugin_oh-my-claudecode_t__lsp_diagnostics",
-  "tool_input_preview": "{\"file\":\"C:\\\\Users\\\\svjat\\\\dev\\\\chess engine\\\\src\\\\test\\\\java\\\\engine\\\\tune\\\\CorpusReaderTest.java\"}",
-  "error": "Language server 'jdtls' not found.\nInstall with: Install from https://github.com/eclipse/eclipse.jdt.ls",
-  "timestamp": "2026-07-01T17:08:17.812Z",
-  "retry_count": 5
-}

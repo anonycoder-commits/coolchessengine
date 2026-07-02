@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd \\\"C:\\\\Users\\\\svjat\\\\dev\\\\chess engine\\\" && diff \\\"C:\\\\Users\\\\svjat\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-svjat-dev-chess-engine\\\\4937e8a5-a79c-4efc-b7a9-73b000095fb6\\\\scratchpad\\\\Sear...",
-  "error": "Exit code 2\ndiff: 'C:\\Users\\svjat\\AppData\\Local\\Temp\\claude\\C--Users-svjat-dev-chess-engine\\4937e8a5-a79c-4efc-b7a9-73b000095fb6\\scratchpad\\Search.java.pvsbak': No such file or directory",
-  "timestamp": "2026-07-02T07:26:19.132Z",
-  "retry_count": 1
-}
