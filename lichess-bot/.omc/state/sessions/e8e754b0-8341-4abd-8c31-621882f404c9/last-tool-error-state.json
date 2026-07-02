@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd \\\"C:/Users/svjat/dev/chess engine/lichess-bot\\\" && ls -la && echo \\\"---engines---\\\" && ls -la engines 2>&1 && echo \\\"---java---\\\" && java -version 2>&1\",\"description\":\"Check current lic...",
+  "error": "Exit code 2\ntotal 16\ndrwxr-xr-x 1 svjat 197609    0 Jul  1 13:14 .\ndrwxr-xr-x 1 svjat 197609    0 Jul  1 13:11 ..\ndrwxr-xr-x 1 svjat 197609    0 Jul  1 12:59 .omc\ndrwxr-xr-x 1 svjat 197609    0 Jul  1 12:59 __pycache__\n-rw-r--r-- 1 svjat 197609 5198 Jul  1 13:14 config.yml\n-rwxr-xr-x 1 svjat 197609 3229 Jul  1 12:58 run_bridge.py\n---engines---\nls: cannot access 'engines': No such file or directory",
+  "timestamp": "2026-07-01T10:18:37.314Z",
+  "retry_count": 1
+}

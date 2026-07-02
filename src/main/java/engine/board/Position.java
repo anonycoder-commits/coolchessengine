@@ -43,6 +43,32 @@ public final class Position {
         CASTLE_MASK[60] &= ~(CASTLE_BK | CASTLE_BQ); // e8
     }
 
+    public Position() {}
+
+    /**
+     * Deep copy: an independent board with identical state, safe to make/unmake moves
+     * on from another thread without racing the original. Used to give each Lazy SMP
+     * search worker its own board instead of sharing one mutable Position across threads.
+     */
+    public Position(Position other) {
+        System.arraycopy(other.bb, 0, this.bb, 0, this.bb.length);
+        System.arraycopy(other.occByColor, 0, this.occByColor, 0, this.occByColor.length);
+        this.occupied = other.occupied;
+        System.arraycopy(other.board, 0, this.board, 0, this.board.length);
+        this.sideToMove = other.sideToMove;
+        this.castling = other.castling;
+        this.epSquare = other.epSquare;
+        this.halfmoveClock = other.halfmoveClock;
+        this.fullmoveNumber = other.fullmoveNumber;
+        this.key = other.key;
+        System.arraycopy(other.undoCaptured, 0, this.undoCaptured, 0, this.undoCaptured.length);
+        System.arraycopy(other.undoCastling, 0, this.undoCastling, 0, this.undoCastling.length);
+        System.arraycopy(other.undoEp, 0, this.undoEp, 0, this.undoEp.length);
+        System.arraycopy(other.undoHalfmove, 0, this.undoHalfmove, 0, this.undoHalfmove.length);
+        System.arraycopy(other.undoKey, 0, this.undoKey, 0, this.undoKey.length);
+        this.ply = other.ply;
+    }
+
     public static Position startpos() {
         return fromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     }
@@ -272,6 +298,33 @@ public final class Position {
         castling = undoCastling[ply];
         epSquare = undoEp[ply];
         halfmoveClock = undoHalfmove[ply];
+        key = undoKey[ply];
+    }
+
+    /**
+     * Passes the move without moving any piece (for null-move pruning): flips the side to
+     * move and clears the en-passant square, exactly the side-to-move/ep bookkeeping a real
+     * move does, with no piece movement, capture, or castling-rights change. Shares the
+     * regular undo stack ({@code undoEp}/{@code undoKey}/{@code ply}) since it is sized far
+     * beyond any search's recursion depth and a null move advances/retreats {@code ply}
+     * exactly like {@link #makeMove}/{@link #unmakeMove} do.
+     */
+    public void makeNullMove() {
+        undoEp[ply] = epSquare;
+        undoKey[ply] = key;
+        if (epSquare >= 0 && epRelevant(epSquare, sideToMove)) {
+            key ^= Zobrist.EP_FILE[epSquare & 7];
+        }
+        epSquare = -1;
+        sideToMove = 1 - sideToMove;
+        key ^= Zobrist.SIDE;
+        ply++;
+    }
+
+    public void unmakeNullMove() {
+        ply--;
+        sideToMove = 1 - sideToMove;
+        epSquare = undoEp[ply];
         key = undoKey[ply];
     }
 

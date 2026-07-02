@@ -1,0 +1,11 @@
+{
+  "active": true,
+  "started_at": "2026-07-01T12:11:04.897Z",
+  "original_prompt": "/oh-my-claudecode:autopilot Please provide a clean, production-ready Java implementation that integrates directly into my engine's existing Iterative Deepening search structure to prune obvious moves early.\n\nThe solution should include two parts:\n1. An instant bypass check at the very beginning of the search method: if the board state has exactly 1 legal move, skip the entire search tree completely, print the move, and immediately call `System.out.flush()`.\n2. A soft-bound threshold check ins...",
+  "session_id": "e8e754b0-8341-4abd-8c31-621882f404c9",
+  "project_path": "C:\\Users\\svjat\\dev\\chess engine\\lichess-bot",
+  "reinforcement_count": 0,
+  "awaiting_confirmation": true,
+  "awaiting_confirmation_set_at": "2026-07-01T12:11:04.897Z",
+  "last_checked_at": "2026-07-01T12:11:04.897Z"
+}

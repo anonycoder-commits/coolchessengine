@@ -6,11 +6,21 @@ import static engine.board.Piece.*;
 public final class MoveGenerator {
     private MoveGenerator() {}
 
+    // Reused scratch buffer for pseudo-legal moves, one per calling thread: each
+    // generateLegal* call fully consumes and finishes with its buffer (via filterLegal)
+    // before returning, so within one thread no call can be re-entered while a prior
+    // call's scratch contents are still in use. Thread-local rather than a single static
+    // buffer because Lazy SMP now drives this class from multiple search threads at once,
+    // each walking its own Position -- a shared buffer would let one thread's clear()/fill
+    // race another's read, handing filterLegal a move that doesn't belong to its position.
+    private static final ThreadLocal<MoveList> PSEUDO_SCRATCH = ThreadLocal.withInitial(MoveList::new);
+
     /** Appends fully legal moves for the side to move into {@code out}. */
     public static void generateLegal(Position pos, MoveList out) {
-        MoveList pseudo = new MoveList();
-        generatePseudoLegal(pos, pseudo);
-        filterLegal(pos, pseudo, out);
+        MoveList scratch = PSEUDO_SCRATCH.get();
+        scratch.clear();
+        generatePseudoLegal(pos, scratch);
+        filterLegal(pos, scratch, out);
     }
 
     /**
@@ -18,9 +28,10 @@ public final class MoveGenerator {
      * the side to move. Used by quiescence search.
      */
     public static void generateLegalCaptures(Position pos, MoveList out) {
-        MoveList pseudo = new MoveList();
-        generateCapturesPseudo(pos, pseudo);
-        filterLegal(pos, pseudo, out);
+        MoveList scratch = PSEUDO_SCRATCH.get();
+        scratch.clear();
+        generateCapturesPseudo(pos, scratch);
+        filterLegal(pos, scratch, out);
     }
 
     private static void filterLegal(Position pos, MoveList pseudo, MoveList out) {

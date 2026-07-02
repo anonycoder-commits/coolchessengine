@@ -1,0 +1,10 @@
+{
+  "session_id": "5f3c0d59-54d0-4901-b837-fd3dd74826ee",
+  "ended_at": "2026-07-01T21:11:14.144Z",
+  "reason": "other",
+  "agents_spawned": 0,
+  "agents_completed": 0,
+  "modes_used": [
+    "deep-interview"
+  ]
+}

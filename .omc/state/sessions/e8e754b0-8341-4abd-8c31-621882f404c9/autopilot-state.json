@@ -1,0 +1,11 @@
+{
+  "active": false,
+  "current_phase": "completed",
+  "completed_at": "2026-07-01T00:00:00Z",
+  "_meta": {
+    "mode": "autopilot",
+    "sessionId": "e8e754b0-8341-4abd-8c31-621882f404c9",
+    "updatedAt": "2026-07-01T12:26:56.718Z",
+    "updatedBy": "state_write_tool"
+  }
+}

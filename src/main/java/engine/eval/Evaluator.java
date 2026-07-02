@@ -24,6 +24,82 @@ public final class Evaluator {
     private static final int[] MG_VALUE = {82, 337, 365, 477, 1025, 0};
     private static final int[] EG_VALUE = {94, 281, 297, 512, 936, 0};
 
+    // --- pawn structure / king safety / mobility weights ---
+    // Every term below is a genuine MG/EG *pair* (not a single flat value split by eye) --
+    // doubled pawns bite harder once there are no piece-play compensations left to offset
+    // them, isolated pawns matter less once a king can help defend them directly, and passed
+    // pawns are dramatically more dangerous once there's no piece firepower left to blockade
+    // them at leisure. Feeding these into the same mg/eg accumulators as material+PST (see
+    // evaluate()) is what actually taper these terms -- adding a single flat value after the
+    // phase blend, as this evaluator previously did, meant every one of them applied at full
+    // strength in a bare king-and-pawn endgame exactly as if the queens were still on the
+    // board, which is the classic "endgame bleeding" failure mode this refactor fixes.
+    private static final int DOUBLED_MG = 12;
+    private static final int DOUBLED_EG = 20;
+    private static final int ISOLATED_MG = 14;
+    private static final int ISOLATED_EG = 10;
+    // Passed-pawn bonus indexed by the pawn's rank relative to its own side (0..7). EG ramps
+    // far more steeply toward the promotion rank: with no pieces left to blockade or round up
+    // a passer, a pawn on the 6th/7th is close to a second queen, not just a small edge.
+    private static final int[] PASSED_MG = {0, 5, 8, 12, 20, 32, 50, 0};
+    private static final int[] PASSED_EG = {0, 10, 18, 30, 50, 90, 150, 0};
+
+    // King-safety shield/file terms are an almost purely midgame concept -- they price in the
+    // danger of enemy queen/rook fire down an open line at the king, which stops mattering
+    // once those attackers are gone. EG values are small, not zero, since a king still prefers
+    // some cover against a lone rook/queen endgame, but nowhere near midgame weight; EG king
+    // placement is instead driven by EG_PST[KING] rewarding centralization (see initPst()).
+    private static final int SHIELD_MG = 8;
+    private static final int SHIELD_EG = 2;
+    private static final int OPEN_FILE_MG = 20;
+    private static final int OPEN_FILE_EG = 4;
+    private static final int SEMI_OPEN_FILE_MG = 10;
+    private static final int SEMI_OPEN_FILE_EG = 3;
+
+    // Mobility by piece TYPE: rooks/queens gain relative value in the endgame (open lines
+    // decide races once material thins out), while knights/bishops taper down slightly.
+    private static final int[] MOBILITY_MG = {0, 4, 4, 3, 1, 0};
+    private static final int[] MOBILITY_EG = {0, 3, 3, 4, 2, 0};
+
+    // Weighted-mobility "Ambition" top-ups: on top of the flat per-square MOBILITY_MG/EG
+    // rate above, a mobility square gets an extra bonus when it represents genuine central/
+    // open-line pressure rather than just square count -- a rook eyeing an open file or a
+    // knight/bishop hitting a center square is worth more than an equally-mobile piece
+    // shuffling along the back rank. Added on top of (not instead of) the base rate, so total
+    // weight for a "premium" square is MOBILITY_*[type] + the matching bonus below.
+    private static final int ROOK_OPEN_FILE_MOBILITY_MG = 3;
+    private static final int ROOK_OPEN_FILE_MOBILITY_EG = 2;
+    private static final int QUEEN_OPEN_FILE_MOBILITY_MG = 2;
+    private static final int QUEEN_OPEN_FILE_MOBILITY_EG = 2;
+    private static final int KNIGHT_CENTER_MOBILITY_MG = 6;
+    private static final int KNIGHT_CENTER_MOBILITY_EG = 4;
+    private static final int BISHOP_CENTER_MOBILITY_MG = 5;
+    private static final int BISHOP_CENTER_MOBILITY_EG = 3;
+
+    // Central outposts: a knight or bishop parked on d4/d5/e4/e5 that no enemy pawn can ever
+    // structurally challenge (see outpostScore()) is a long-term thorn the opponent can't
+    // easily remove, so it earns a standing "tension bonus" independent of mobility/PST --
+    // this is what keeps the engine from retreating such a piece to a "safer" but passive
+    // square purely to reduce short-term tactical exposure. Knights get the larger bonus
+    // since, unlike bishops, they have no long-diagonal alternative outlet once parked.
+    private static final long CENTER_SQUARES = (1L << 27) | (1L << 28) | (1L << 35) | (1L << 36); // d4,e4,d5,e5
+    private static final int OUTPOST_KNIGHT_MG = 18;
+    private static final int OUTPOST_KNIGHT_EG = 12;
+    private static final int OUTPOST_BISHOP_MG = 12;
+    private static final int OUTPOST_BISHOP_EG = 8;
+
+    // --- bishop pair / rook activity weights (tapered: separate mg/eg, unlike the flat
+    // pawn/mobility/king-safety terms above) ---
+    private static final int BISHOP_PAIR_MG = 15;
+    private static final int BISHOP_PAIR_EG = 30;
+
+    private static final int ROOK_OPEN_FILE_MG = 20;
+    private static final int ROOK_OPEN_FILE_EG = 15;
+    private static final int ROOK_SEMI_OPEN_FILE_MG = 10;
+    private static final int ROOK_SEMI_OPEN_FILE_EG = 10;
+    private static final int ROOK_7TH_MG = 25;
+    private static final int ROOK_7TH_EG = 40;
+
     // Game-phase weight per piece TYPE; full opening phase sums to 24.
     private static final int[] PHASE_INC = {0, 1, 1, 2, 4, 0};
     private static final int PHASE_MAX = 24;
@@ -31,18 +107,6 @@ public final class Evaluator {
     // Piece-square tables, [type][square], written a8-first (see static init for orientation).
     private static final int[][] MG_PST = new int[6][];
     private static final int[][] EG_PST = new int[6][];
-
-    // --- pawn structure / king safety / mobility weights ---
-    private static final int DOUBLED = 12;
-    private static final int ISOLATED = 14;
-    // Passed-pawn bonus indexed by the pawn's rank relative to its own side (0..7).
-    private static final int[] PASSED = {0, 5, 12, 20, 35, 60, 100, 0};
-
-    private static final int SHIELD = 8;
-    private static final int OPEN_FILE = 20;
-    private static final int SEMI_OPEN_FILE = 10;
-
-    private static final int[] MOBILITY = {0, 4, 4, 3, 1, 0}; // by piece TYPE
 
     // Precomputed file / adjacent-file / passed-pawn masks.
     private static final long[] FILES = new long[8];
@@ -94,31 +158,64 @@ public final class Evaluator {
             }
         }
 
+        int[] bishopPair = evalBishopPair(pos);
+        mg += bishopPair[0];
+        eg += bishopPair[1];
+
+        int[] rookActivity = evalRooks(pos);
+        mg += rookActivity[0];
+        eg += rookActivity[1];
+
+        int[] pawns = evalPawns(pos);
+        mg += pawns[0];
+        eg += pawns[1];
+
+        int[] mobility = evalMobility(pos);
+        mg += mobility[0];
+        eg += mobility[1];
+
+        int[] kingSafety = evalKingSafety(pos);
+        mg += kingSafety[0];
+        eg += kingSafety[1];
+
+        int[] outposts = evalOutposts(pos);
+        mg += outposts[0];
+        eg += outposts[1];
+
+        // Linear interpolation core: every term above (material, PST, bishop pair, rook
+        // activity, pawn structure, mobility, king safety, outposts) has now fed both an mg
+        // and an eg contribution into the same two accumulators, so this single blend is the
+        // only place game phase is applied -- nothing bypasses it and reaches the final score
+        // unscaled.
         int mgPhase = Math.min(phase, PHASE_MAX);
         int egPhase = PHASE_MAX - mgPhase;
         int score = (mg * mgPhase + eg * egPhase) / PHASE_MAX;
 
-        score += evalPawns(pos);
-        score += evalMobility(pos);
-        score += evalKingSafety(pos);
-
         return pos.sideToMove() == WHITE ? score : -score;
     }
 
-    // --- pawn structure (white-relative) ---
+    // --- pawn structure (tapered, white-relative) ---
 
-    private static int evalPawns(Position pos) {
+    private static int[] evalPawns(Position pos) {
         long wp = pos.pieces(index(WHITE, PAWN));
         long bp = pos.pieces(index(BLACK, PAWN));
-        return pawnScore(wp, bp, WHITE) - pawnScore(bp, wp, BLACK);
+        int[] w = pawnScore(wp, bp, WHITE);
+        int[] b = pawnScore(bp, wp, BLACK);
+        return new int[] {w[0] - b[0], w[1] - b[1]};
     }
 
-    private static int pawnScore(long own, long enemy, int color) {
-        int s = 0;
+    private static int[] pawnScore(long own, long enemy, int color) {
+        int mg = 0, eg = 0;
         for (int f = 0; f < 8; f++) {
             int cnt = Long.bitCount(own & FILES[f]);
-            if (cnt > 1) s -= DOUBLED * (cnt - 1);
-            if (cnt > 0 && (own & ADJ[f]) == 0) s -= ISOLATED * cnt;
+            if (cnt > 1) {
+                mg -= DOUBLED_MG * (cnt - 1);
+                eg -= DOUBLED_EG * (cnt - 1);
+            }
+            if (cnt > 0 && (own & ADJ[f]) == 0) {
+                mg -= ISOLATED_MG * cnt;
+                eg -= ISOLATED_EG * cnt;
+            }
         }
         long b = own;
         while (b != 0) {
@@ -127,58 +224,187 @@ public final class Evaluator {
             long mask = color == WHITE ? WHITE_PASSED[sq] : BLACK_PASSED[sq];
             if ((enemy & mask) == 0) {
                 int rel = color == WHITE ? (sq >> 3) : 7 - (sq >> 3);
-                s += PASSED[rel];
+                mg += PASSED_MG[rel];
+                eg += PASSED_EG[rel];
             }
         }
-        return s;
+        return new int[] {mg, eg};
     }
 
-    // --- mobility (white-relative) ---
+    // --- weighted mobility (tapered, white-relative) ---
+    //
+    // "Ambition" weighting: every reachable square still earns the flat MOBILITY_MG/EG rate,
+    // but a square that represents genuine pressure -- a rook/queen move landing on a
+    // pawnless (open) file, or a knight/bishop move landing on a center square -- earns an
+    // additional top-up on top of that base rate (see the *_MOBILITY_* constants above).
+    // openFiles is computed once per evaluate() call and shared by both colors' rook/queen
+    // loops rather than recomputed per piece.
 
-    private static int evalMobility(Position pos) {
+    private static int[] evalMobility(Position pos) {
         long occ = pos.occupied();
-        return mobilityScore(pos, WHITE, occ) - mobilityScore(pos, BLACK, occ);
+        long allPawns = pos.pieces(index(WHITE, PAWN)) | pos.pieces(index(BLACK, PAWN));
+        long openFiles = 0L;
+        for (int f = 0; f < 8; f++) {
+            if ((allPawns & FILES[f]) == 0) openFiles |= FILES[f];
+        }
+        int[] w = mobilityScore(pos, WHITE, occ, openFiles);
+        int[] b = mobilityScore(pos, BLACK, occ, openFiles);
+        return new int[] {w[0] - b[0], w[1] - b[1]};
     }
 
-    private static int mobilityScore(Position pos, int color, long occ) {
+    private static int[] mobilityScore(Position pos, int color, long occ, long openFiles) {
         long own = pos.occupied(color);
-        int s = 0;
+        int mg = 0, eg = 0;
 
         long n = pos.pieces(index(color, KNIGHT));
         while (n != 0) {
             int sq = Long.numberOfTrailingZeros(n);
             n &= n - 1;
-            s += MOBILITY[KNIGHT] * Long.bitCount(Attacks.KNIGHT[sq] & ~own);
+            long dest = Attacks.KNIGHT[sq] & ~own;
+            int cnt = Long.bitCount(dest);
+            int centerCnt = Long.bitCount(dest & CENTER_SQUARES);
+            mg += MOBILITY_MG[KNIGHT] * cnt + KNIGHT_CENTER_MOBILITY_MG * centerCnt;
+            eg += MOBILITY_EG[KNIGHT] * cnt + KNIGHT_CENTER_MOBILITY_EG * centerCnt;
         }
         long bsh = pos.pieces(index(color, BISHOP));
         while (bsh != 0) {
             int sq = Long.numberOfTrailingZeros(bsh);
             bsh &= bsh - 1;
-            s += MOBILITY[BISHOP] * Long.bitCount(Attacks.bishop(sq, occ) & ~own);
+            long dest = Attacks.bishop(sq, occ) & ~own;
+            int cnt = Long.bitCount(dest);
+            int centerCnt = Long.bitCount(dest & CENTER_SQUARES);
+            mg += MOBILITY_MG[BISHOP] * cnt + BISHOP_CENTER_MOBILITY_MG * centerCnt;
+            eg += MOBILITY_EG[BISHOP] * cnt + BISHOP_CENTER_MOBILITY_EG * centerCnt;
         }
         long r = pos.pieces(index(color, ROOK));
         while (r != 0) {
             int sq = Long.numberOfTrailingZeros(r);
             r &= r - 1;
-            s += MOBILITY[ROOK] * Long.bitCount(Attacks.rook(sq, occ) & ~own);
+            long dest = Attacks.rook(sq, occ) & ~own;
+            int cnt = Long.bitCount(dest);
+            int openCnt = Long.bitCount(dest & openFiles);
+            mg += MOBILITY_MG[ROOK] * cnt + ROOK_OPEN_FILE_MOBILITY_MG * openCnt;
+            eg += MOBILITY_EG[ROOK] * cnt + ROOK_OPEN_FILE_MOBILITY_EG * openCnt;
         }
         long q = pos.pieces(index(color, QUEEN));
         while (q != 0) {
             int sq = Long.numberOfTrailingZeros(q);
             q &= q - 1;
-            s += MOBILITY[QUEEN] * Long.bitCount(Attacks.queen(sq, occ) & ~own);
+            long dest = Attacks.queen(sq, occ) & ~own;
+            int cnt = Long.bitCount(dest);
+            int openCnt = Long.bitCount(dest & openFiles);
+            mg += MOBILITY_MG[QUEEN] * cnt + QUEEN_OPEN_FILE_MOBILITY_MG * openCnt;
+            eg += MOBILITY_EG[QUEEN] * cnt + QUEEN_OPEN_FILE_MOBILITY_EG * openCnt;
         }
-        return s;
+        return new int[] {mg, eg};
     }
 
-    // --- king safety (white-relative) ---
+    // --- central outposts (tapered, white-relative) ---
 
-    private static int evalKingSafety(Position pos) {
-        return kingSafetyScore(pos, WHITE) - kingSafetyScore(pos, BLACK);
+    private static int[] evalOutposts(Position pos) {
+        int[] w = outpostScore(pos, WHITE);
+        int[] b = outpostScore(pos, BLACK);
+        return new int[] {w[0] - b[0], w[1] - b[1]};
     }
 
-    private static int kingSafetyScore(Position pos, int color) {
-        int s = 0;
+    private static int[] outpostScore(Position pos, int color) {
+        int mg = 0, eg = 0;
+        long enemyPawns = pos.pieces(index(1 - color, PAWN));
+
+        long knights = pos.pieces(index(color, KNIGHT)) & CENTER_SQUARES;
+        while (knights != 0) {
+            int sq = Long.numberOfTrailingZeros(knights);
+            knights &= knights - 1;
+            if (isSafeOutpost(sq, color, enemyPawns)) {
+                mg += OUTPOST_KNIGHT_MG;
+                eg += OUTPOST_KNIGHT_EG;
+            }
+        }
+        long bishops = pos.pieces(index(color, BISHOP)) & CENTER_SQUARES;
+        while (bishops != 0) {
+            int sq = Long.numberOfTrailingZeros(bishops);
+            bishops &= bishops - 1;
+            if (isSafeOutpost(sq, color, enemyPawns)) {
+                mg += OUTPOST_BISHOP_MG;
+                eg += OUTPOST_BISHOP_EG;
+            }
+        }
+        return new int[] {mg, eg};
+    }
+
+    /** True if no enemy pawn -- now or ever, structurally -- can capture onto {@code sq}: no
+     *  enemy pawn sits on an adjacent file at a rank still "ahead" of {@code sq} from the
+     *  piece's own side. Reuses WHITE_PASSED/BLACK_PASSED (already "adjacent-files-plus-own-
+     *  file, ranks ahead") intersected with ADJ[f] to drop the irrelevant own-file component,
+     *  rather than computing a dedicated mask. */
+    private static boolean isSafeOutpost(int sq, int color, long enemyPawns) {
+        int f = sq & 7;
+        long aheadOnAdjFiles = ADJ[f] & (color == WHITE ? WHITE_PASSED[sq] : BLACK_PASSED[sq]);
+        return (enemyPawns & aheadOnAdjFiles) == 0;
+    }
+
+    // --- bishop pair (tapered, white-relative) ---
+
+    private static int[] evalBishopPair(Position pos) {
+        int mg = 0, eg = 0;
+        if (Long.bitCount(pos.pieces(index(WHITE, BISHOP))) >= 2) {
+            mg += BISHOP_PAIR_MG;
+            eg += BISHOP_PAIR_EG;
+        }
+        if (Long.bitCount(pos.pieces(index(BLACK, BISHOP))) >= 2) {
+            mg -= BISHOP_PAIR_MG;
+            eg -= BISHOP_PAIR_EG;
+        }
+        return new int[] {mg, eg};
+    }
+
+    // --- rook file activity + 7th/8th-rank infiltration (tapered, white-relative) ---
+
+    private static int[] evalRooks(Position pos) {
+        int[] w = rookScore(pos, WHITE);
+        int[] b = rookScore(pos, BLACK);
+        return new int[] {w[0] - b[0], w[1] - b[1]};
+    }
+
+    private static int[] rookScore(Position pos, int color) {
+        int mg = 0, eg = 0;
+        long ownPawns = pos.pieces(index(color, PAWN));
+        long enemyPawns = pos.pieces(index(1 - color, PAWN));
+        long rooks = pos.pieces(index(color, ROOK));
+        while (rooks != 0) {
+            int sq = Long.numberOfTrailingZeros(rooks);
+            rooks &= rooks - 1;
+            int f = sq & 7;
+            boolean ownOnFile = (ownPawns & FILES[f]) != 0;
+            boolean enemyOnFile = (enemyPawns & FILES[f]) != 0;
+            if (!ownOnFile && !enemyOnFile) {
+                mg += ROOK_OPEN_FILE_MG;
+                eg += ROOK_OPEN_FILE_EG;
+            } else if (!ownOnFile) {
+                mg += ROOK_SEMI_OPEN_FILE_MG;
+                eg += ROOK_SEMI_OPEN_FILE_EG;
+            }
+            // Same relative-rank convention as PASSED above: rel 6/7 is the 7th/8th rank
+            // from this rook's own side, i.e. deep in (or on) the enemy's back ranks.
+            int rel = color == WHITE ? (sq >> 3) : 7 - (sq >> 3);
+            if (rel >= 6) {
+                mg += ROOK_7TH_MG;
+                eg += ROOK_7TH_EG;
+            }
+        }
+        return new int[] {mg, eg};
+    }
+
+    // --- king safety (tapered, white-relative) ---
+
+    private static int[] evalKingSafety(Position pos) {
+        int[] w = kingSafetyScore(pos, WHITE);
+        int[] b = kingSafetyScore(pos, BLACK);
+        return new int[] {w[0] - b[0], w[1] - b[1]};
+    }
+
+    private static int[] kingSafetyScore(Position pos, int color) {
+        int mg = 0, eg = 0;
         int ksq = pos.kingSquare(color);
         int kf = ksq & 7;
         long ownPawns = pos.pieces(index(color, PAWN));
@@ -188,17 +414,26 @@ public final class Evaluator {
         long zone = FILES[kf] | ADJ[kf];
         long ahead = color == WHITE ? WHITE_PASSED[ksq] : BLACK_PASSED[ksq];
         long shield = ownPawns & zone & ahead;
-        s += SHIELD * Long.bitCount(shield);
+        int shieldCount = Long.bitCount(shield);
+        mg += SHIELD_MG * shieldCount;
+        eg += SHIELD_EG * shieldCount;
 
-        // Open / semi-open files next to the king are dangerous.
+        // Open / semi-open files next to the king are dangerous mainly while enemy
+        // heavy pieces are still on the board to exploit them (mg-heavy, see the
+        // SHIELD/OPEN_FILE/SEMI_OPEN_FILE constants above).
         int lo = Math.max(0, kf - 1), hi = Math.min(7, kf + 1);
         for (int f = lo; f <= hi; f++) {
             boolean ownOnFile = (ownPawns & FILES[f]) != 0;
             boolean enemyOnFile = (enemyPawns & FILES[f]) != 0;
-            if (!ownOnFile && !enemyOnFile) s -= OPEN_FILE;
-            else if (!ownOnFile) s -= SEMI_OPEN_FILE;
+            if (!ownOnFile && !enemyOnFile) {
+                mg -= OPEN_FILE_MG;
+                eg -= OPEN_FILE_EG;
+            } else if (!ownOnFile) {
+                mg -= SEMI_OPEN_FILE_MG;
+                eg -= SEMI_OPEN_FILE_EG;
+            }
         }
-        return s;
+        return new int[] {mg, eg};
     }
 
     // --- piece-square table data ---

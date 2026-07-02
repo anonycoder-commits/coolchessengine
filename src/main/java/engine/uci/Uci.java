@@ -3,28 +3,53 @@ package engine.uci;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import engine.board.Move;
 import engine.board.MoveGenerator;
 import engine.board.MoveList;
 import engine.board.Position;
+import engine.search.HandcraftedEvaluator;
+import engine.search.LazySmpSearch;
 import engine.search.Search;
 import engine.search.SearchLimits;
+import engine.search.TranspositionTable;
 
 /**
  * Minimal UCI handler (Phase 1b walking skeleton).
  *
- * Supports: uci, isready, ucinewgame, setoption (Hash), position (startpos|fen ... [moves ...]),
- * go [depth N | movetime | wtime/btime/winc/binc/movestogo | infinite], stop, quit.
+ * Supports: uci, isready, ucinewgame, setoption (Hash, Threads), position (startpos|fen
+ * ... [moves ...]), go [depth N | movetime | wtime/btime/winc/binc/movestogo | infinite],
+ * stop, quit. 'go' runs on a background thread so the input loop can keep reading
+ * 'stop'/'quit' while a search is in flight.
  */
 public final class Uci {
 
     private static final String NAME = "ChessEngine v0.1";
     private static final String AUTHOR = "chess-engine team";
     private static final int DEFAULT_DEPTH = 6;
+    private static final int DEFAULT_HASH_MB = 16;
+    private static final int MAX_THREADS = 128;
 
     private Position position = Position.startpos();
-    private final Search search = new Search();
+    private final TranspositionTable tt = new TranspositionTable(DEFAULT_HASH_MB);
+    private final Search search = new Search(new HandcraftedEvaluator(), tt);
+    private int threads = 1;
+    private LazySmpSearch smp; // built lazily once Threads > 1 is requested
+
+    // A single persistent daemon thread (rather than a fresh Thread per 'go') so the input
+    // loop can keep reading 'stop'/'quit' while a search is in flight. Persistent also
+    // matters for correctness under piped stdout (e.g. UciProtocolTest): a short-lived
+    // per-call Thread that dies right after printing "bestmove" trips PipedInputStream's
+    // "Write end dead" check the next time *any* thread writes to the pipe, since it
+    // tracks the last writer thread's liveness rather than the stream's as a whole.
+    private final ExecutorService searchExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "uci-search");
+        t.setDaemon(true);
+        return t;
+    });
+    private volatile boolean searching;
 
     public static void main(String[] args) throws IOException {
         new Uci().run();
@@ -42,6 +67,7 @@ public final class Uci {
                     System.out.println("id name " + NAME);
                     System.out.println("id author " + AUTHOR);
                     System.out.println("option name Hash type spin default 16 min 1 max 1024");
+                    System.out.println("option name Threads type spin default 1 min 1 max " + MAX_THREADS);
                     System.out.println("uciok");
                     break;
                 case "isready":
@@ -58,10 +84,22 @@ public final class Uci {
                     handlePosition(tokens);
                     break;
                 case "go":
-                    handleGo(tokens);
+                    // Guard against overlapping 'go' calls, since a compliant GUI won't send
+                    // one anyway.
+                    if (!searching) {
+                        searching = true;
+                        searchExecutor.submit(() -> {
+                            try {
+                                handleGo(tokens);
+                            } finally {
+                                searching = false;
+                            }
+                        });
+                    }
                     break;
                 case "stop":
-                    // Single-threaded skeleton: nothing in flight to stop.
+                    search.requestStop();
+                    if (smp != null) smp.requestStop();
                     break;
                 case "quit":
                     return;
@@ -84,7 +122,12 @@ public final class Uci {
         String name = tokens[nameIdx + 1];
         if (name.equalsIgnoreCase("Hash") && valueIdx >= 0) {
             int mb = parseInt(tokens, valueIdx + 1);
-            if (mb > 0) search.setHashSize(mb);
+            if (mb > 0) {
+                tt.resize(mb);
+            }
+        } else if (name.equalsIgnoreCase("Threads") && valueIdx >= 0) {
+            int n = parseInt(tokens, valueIdx + 1);
+            if (n > 0) threads = Math.min(n, MAX_THREADS);
         }
     }
 
@@ -134,8 +177,17 @@ public final class Uci {
         }
         if (!anyLimit) limits.depth = DEFAULT_DEPTH;
 
-        int best = search.think(position, limits);
-        if (search.bypassPrinted) return; // Search already emitted bestmove for the forced-move case
+        int best;
+        boolean bypassPrinted;
+        if (threads <= 1) {
+            best = search.think(position, limits);
+            bypassPrinted = search.bypassPrinted;
+        } else {
+            if (smp == null || smp.threadCount() != threads) smp = new LazySmpSearch(threads, tt);
+            best = smp.think(position, limits);
+            bypassPrinted = smp.bypassPrinted;
+        }
+        if (bypassPrinted) return; // the search already emitted bestmove for the forced-move case
         String pv = best != 0 ? Move.toUci(best) : "0000";
         System.out.println("bestmove " + pv);
     }

@@ -1,0 +1,11 @@
+{
+  "active": true,
+  "started_at": "2026-07-01T13:30:56.497Z",
+  "original_prompt": "/oh-my-claudecode:autopilot Provide an optimized implementation of an Alpha-Beta search function incorporating an MVV-LVA (Most Valuable Victim - Least Valuable Aggressor) move ordering framework.\n\nThe code must meet these strict criteria:\n1. Ensure the move sorting mechanism uses primitive arrays or optimized collection sorting to minimize object allocation overhead inside the search loop.\n2. Implement immediate Beta-cutoffs to maximize alpha-beta pruning efficiency.\n3. Keep the evaluation f...",
+  "session_id": "778cd907-1994-4b4f-81ea-445dceb73b2b",
+  "project_path": "C:\\Users\\svjat\\dev\\chess engine\\lichess-bot",
+  "reinforcement_count": 0,
+  "awaiting_confirmation": true,
+  "awaiting_confirmation_set_at": "2026-07-01T13:30:56.497Z",
+  "last_checked_at": "2026-07-01T13:30:56.497Z"
+}
