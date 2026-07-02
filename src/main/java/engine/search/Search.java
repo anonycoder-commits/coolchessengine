@@ -140,6 +140,17 @@ public final class Search {
     private static final int SOFT_BOUND_STABLE_ITERATIONS_DECISIVE = 2; // relaxed threshold once clearly winning
     private static final int SOFT_BOUND_DECISIVE_SCORE_CP = 200; // +2.00 pawns
 
+    // Volatility gate: the soft-bound early exit banks time when the root move has been stable,
+    // but stability alone is blind to *sharp* positions -- a forcing pawn breakthrough (e.g.
+    // ...d3+) can sit at a mild static eval for many stable iterations while the real damage
+    // lurks a few plies deeper. When the committed move is itself a breakthrough (promotion,
+    // advanced pawn push, or a check) OR the recent scores are swinging, the optimum-time soft
+    // exit is suppressed so the search keeps going (still bounded by softLimitMs and the
+    // lost-position brake). BREAKTHROUGH_MIN_REL_RANK 4 = a push to the relative 5th rank+.
+    private static final int VOLATILITY_SWING_CP = 30;
+    private static final int VOLATILITY_WINDOW = 3;
+    private static final int BREAKTHROUGH_MIN_REL_RANK = 4;
+
     // Evaluation-based time lock: a near-dead-equal root score (|score| <= this many
     // centipawns) during the opening/early middlegame (game ply < EVAL_LOCK_MAX_GAME_PLY) is
     // precisely the situation where quiet, creeping positional threats matter most and a
@@ -320,6 +331,7 @@ public final class Search {
     public boolean useIir = true;          // internal iterative reductions (no TT move -> depth-1)
     public boolean useCounterMove = true;  // countermove ordering heuristic
     public boolean useQsTt = true;         // quiescence transposition-table probe/store
+    public boolean useVolatilityGate = true; // suppress the soft early exit in sharp positions
 
     // Obvious-move pruning: skip search entirely on a forced single reply, and cut
     // iterative deepening short once a shallow iteration shows a lopsided root gap.
@@ -412,6 +424,9 @@ public final class Search {
         int previousBestMove = 0;
         int stableIterationsCount = 0;
         int lostIterationsCount = 0;
+        // Ring buffer of the last few committed scores, for the volatility swing signal.
+        int[] recentScores = new int[VOLATILITY_WINDOW];
+        int recentScoreCount = 0;
         for (int d = 1; d <= maxDepth; d++) {
             currentDepth = d;
             int score;
@@ -507,6 +522,22 @@ public final class Search {
                 lostIterationsCount = 0;
             }
 
+            // Record this iteration's score and compute the recent swing (volatility signal B).
+            recentScores[d % VOLATILITY_WINDOW] = committedScore;
+            recentScoreCount++;
+            int scoreSwing = 0;
+            if (recentScoreCount >= VOLATILITY_WINDOW) {
+                int lo = Integer.MAX_VALUE, hi = Integer.MIN_VALUE;
+                for (int s : recentScores) { if (s < lo) lo = s; if (s > hi) hi = s; }
+                scoreSwing = hi - lo;
+            }
+            // Volatility gate: a sharp committed move (promotion / advanced pawn push / check)
+            // or an unsettled recent score means the shallow-but-stable read can't be trusted,
+            // so the optimum-time soft exit is suppressed (search continues, still bounded by
+            // softLimitMs and the lost-position brake).
+            boolean volatilePos = useTime && useVolatilityGate
+                    && (isBreakthroughMove(pos, committedMove) || scoreSwing > VOLATILITY_SWING_CP);
+
             // Evaluation-based time lock (see EVAL_LOCK_* constants): active only while the
             // position is still opening/early-middlegame AND dead-equal on the board, i.e.
             // exactly the profile of a quiet position with a not-yet-visible creeping
@@ -526,12 +557,13 @@ public final class Search {
             // (b) the root move has stopped changing for several iterations in a row -- a
             // depth confirming the same move again is unlikely to change the final decision,
             // so the remaining clock time is better saved than spent re-confirming it.
-            if (evalLockActive) {
+            if (evalLockActive || volatilePos) {
                 // Explicitly clear rather than merely skip-setting: softStopArmed is a field
-                // that persists across iterations, so a prior iteration (before the lock
-                // engaged, or before committedScore dropped into the dead-equal band) could
-                // otherwise leave a stale `true` behind that checkTime() would still honor
-                // mid-iteration even though this iteration's block never re-armed it.
+                // that persists across iterations, so a prior iteration (before the lock/
+                // volatility engaged, or before committedScore dropped into the dead-equal
+                // band) could otherwise leave a stale `true` behind that checkTime() would
+                // still honor mid-iteration even though this iteration's block never re-armed
+                // it. A volatile position must never take the optimum-time soft exit.
                 softStopArmed = false;
             } else if (useTime && d >= SOFT_BOUND_MIN_DEPTH) {
                 // Acceleration rule: a decisively winning score (> +2.00 pawns) needs only 2
@@ -630,6 +662,27 @@ public final class Search {
         if (!useObviousMovePruning || depth < obviousMoveCheckDepth) return false;
         if (rootSecondBestScore <= -INF) return false; // fewer than two scored root moves
         return (rootBestScore - rootSecondBestScore) > obviousMoveMargin;
+    }
+
+    /**
+     * True if {@code move} is a "breakthrough" whose consequences a shallow-but-stable search
+     * can't be trusted to have seen: a promotion, an advanced pawn push (to the relative 5th
+     * rank or beyond), or a checking move. Used by the volatility gate to suppress the
+     * soft-bound early exit. Costs one make/unmake for the check test, run at most once per
+     * completed root iteration.
+     */
+    private boolean isBreakthroughMove(Position pos, int move) {
+        if (move == 0) return false;
+        if (Move.isPromotion(move)) return true;
+        if (Piece.type(pos.pieceAt(Move.from(move))) == Piece.PAWN) {
+            int toRank = Move.to(move) >> 3;
+            int rel = pos.sideToMove() == Piece.WHITE ? toRank : 7 - toRank;
+            if (rel >= BREAKTHROUGH_MIN_REL_RANK) return true;
+        }
+        pos.makeMove(move);
+        boolean givesCheck = pos.inCheck(pos.sideToMove());
+        pos.unmakeMove(move);
+        return givesCheck;
     }
 
     private int negamax(Position pos, int depth, int alpha, int beta, int ply, int extensions) {

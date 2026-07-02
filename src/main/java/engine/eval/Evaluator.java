@@ -94,6 +94,20 @@ public final class Evaluator {
     // decide races once material thins out), while knights/bishops taper down slightly.
     private static final int[] MOBILITY_MG = {0, 4, 4, 3, 1, 0};
     private static final int[] MOBILITY_EG = {0, 3, 3, 4, 2, 0};
+    // Mobility floor: squares a piece reaches that are contested only by an enemy PAWN still
+    // count, at reduced weight (1/this), instead of being masked out entirely. Without it, a
+    // closed position where enemy pawns blanket the board collapses both sides' mobility to
+    // near zero, erasing positional discrimination and nudging the engine to "escape" by
+    // trading its cramped pieces into a structurally worse open line. Full-value squares (safe
+    // from enemy pawns) still drive the center/open-file bonuses.
+    private static final int MOBILITY_MASK_DIVISOR = 4;
+
+    // Pawn levers / breaks: a lever is an own pawn poised to open the structure -- it already
+    // attacks an enemy pawn, or is a single push from attacking one. The side with more levers
+    // holds the initiative to open the position on its own terms, the factor flat mobility is
+    // blind to in closed structures. Tapered mg-heavy (opening matters most with pieces on).
+    private static final int LEVER_MG = 6;
+    private static final int LEVER_EG = 3;
 
     // Passed-pawn king proximity (endgame only): a passer's value in the endgame depends
     // heavily on which king can reach its promotion square first, which pure rank scaling
@@ -244,6 +258,10 @@ public final class Evaluator {
         int[] badBishop = evalBadBishop(pos);
         mg += badBishop[0];
         eg += badBishop[1];
+
+        int[] levers = evalLevers(pos);
+        mg += levers[0];
+        eg += levers[1];
 
         // Linear interpolation core: every term above (material, PST, bishop pair, rook
         // activity, pawn structure, mobility, king safety, outposts) has now fed both an mg
@@ -533,6 +551,31 @@ public final class Evaluator {
         return new int[] {w[0] - b[0], w[1] - b[1]};
     }
 
+    // --- pawn levers / breaks (tapered, white-relative) ---
+
+    private static int[] evalLevers(Position pos) {
+        int diff = leverCount(pos, WHITE) - leverCount(pos, BLACK);
+        return new int[] {diff * LEVER_MG, diff * LEVER_EG};
+    }
+
+    /** Count of {@code color}'s pawn levers: own pawns that already attack an enemy pawn, plus
+     *  own pawns a single (unobstructed) push away from attacking one. */
+    private static int leverCount(Position pos, int color) {
+        long own = pos.pieces(index(color, PAWN));
+        long enemy = pos.pieces(index(1 - color, PAWN));
+        long empty = ~pos.occupied();
+        // Pawns whose current attacks land on an enemy pawn: pull the enemy-pawn set back onto
+        // the attacking pawns (an own pawn attacks an enemy iff the enemy is in own's attacks).
+        long attackNow = pawnAttacks(own, color) & enemy;
+        int direct = Long.bitCount(attackNow);
+        // Pawns one push from attacking: push each pawn one square if empty, then see whose
+        // resulting attacks hit an enemy pawn.
+        long pushed = color == WHITE ? (own << 8) & empty : (own >>> 8) & empty;
+        long attackAfterPush = pawnAttacks(pushed, color) & enemy;
+        int levers = direct + Long.bitCount(attackAfterPush);
+        return levers;
+    }
+
     /** All squares attacked by {@code color}'s pawns (file-wrap masked). */
     private static long pawnAttacks(long pawns, int color) {
         if (color == WHITE) {
@@ -543,17 +586,17 @@ public final class Evaluator {
 
     private static int[] mobilityScore(Position pos, int color, long occ, long openFiles,
                                        long enemyPawnAtt) {
-        long own = pos.occupied(color);
-        long area = ~own & ~enemyPawnAtt; // exclude own pieces and enemy-pawn-controlled squares
+        long notOwn = ~pos.occupied(color); // any square not blocked by an own piece
         int mg = 0, eg = 0;
 
         long n = pos.pieces(index(color, KNIGHT));
         while (n != 0) {
             int sq = Long.numberOfTrailingZeros(n);
             n &= n - 1;
-            long dest = Attacks.KNIGHT[sq] & area;
-            int cnt = Long.bitCount(dest);
-            int centerCnt = Long.bitCount(dest & CENTER_SQUARES);
+            long reach = Attacks.KNIGHT[sq] & notOwn;
+            long safe = reach & ~enemyPawnAtt;
+            int cnt = flooredMobility(reach, safe);
+            int centerCnt = Long.bitCount(safe & CENTER_SQUARES);
             mg += MOBILITY_MG[KNIGHT] * cnt + KNIGHT_CENTER_MOBILITY_MG * centerCnt;
             eg += MOBILITY_EG[KNIGHT] * cnt + KNIGHT_CENTER_MOBILITY_EG * centerCnt;
         }
@@ -561,9 +604,10 @@ public final class Evaluator {
         while (bsh != 0) {
             int sq = Long.numberOfTrailingZeros(bsh);
             bsh &= bsh - 1;
-            long dest = Attacks.bishop(sq, occ) & area;
-            int cnt = Long.bitCount(dest);
-            int centerCnt = Long.bitCount(dest & CENTER_SQUARES);
+            long reach = Attacks.bishop(sq, occ) & notOwn;
+            long safe = reach & ~enemyPawnAtt;
+            int cnt = flooredMobility(reach, safe);
+            int centerCnt = Long.bitCount(safe & CENTER_SQUARES);
             mg += MOBILITY_MG[BISHOP] * cnt + BISHOP_CENTER_MOBILITY_MG * centerCnt;
             eg += MOBILITY_EG[BISHOP] * cnt + BISHOP_CENTER_MOBILITY_EG * centerCnt;
         }
@@ -571,9 +615,10 @@ public final class Evaluator {
         while (r != 0) {
             int sq = Long.numberOfTrailingZeros(r);
             r &= r - 1;
-            long dest = Attacks.rook(sq, occ) & area;
-            int cnt = Long.bitCount(dest);
-            int openCnt = Long.bitCount(dest & openFiles);
+            long reach = Attacks.rook(sq, occ) & notOwn;
+            long safe = reach & ~enemyPawnAtt;
+            int cnt = flooredMobility(reach, safe);
+            int openCnt = Long.bitCount(safe & openFiles);
             mg += MOBILITY_MG[ROOK] * cnt + ROOK_OPEN_FILE_MOBILITY_MG * openCnt;
             eg += MOBILITY_EG[ROOK] * cnt + ROOK_OPEN_FILE_MOBILITY_EG * openCnt;
         }
@@ -581,13 +626,23 @@ public final class Evaluator {
         while (q != 0) {
             int sq = Long.numberOfTrailingZeros(q);
             q &= q - 1;
-            long dest = Attacks.queen(sq, occ) & area;
-            int cnt = Long.bitCount(dest);
-            int openCnt = Long.bitCount(dest & openFiles);
+            long reach = Attacks.queen(sq, occ) & notOwn;
+            long safe = reach & ~enemyPawnAtt;
+            int cnt = flooredMobility(reach, safe);
+            int openCnt = Long.bitCount(safe & openFiles);
             mg += MOBILITY_MG[QUEEN] * cnt + QUEEN_OPEN_FILE_MOBILITY_MG * openCnt;
             eg += MOBILITY_EG[QUEEN] * cnt + QUEEN_OPEN_FILE_MOBILITY_EG * openCnt;
         }
         return new int[] {mg, eg};
+    }
+
+    /** Mobility count with the floor: squares safe from enemy pawns count fully; squares only
+     *  an enemy pawn contests still count, at reduced (1/MOBILITY_MASK_DIVISOR) weight, so a
+     *  closed structure can't zero the term out. {@code safe} is a subset of {@code reach}. */
+    private static int flooredMobility(long reach, long safe) {
+        int full = Long.bitCount(safe);
+        int contested = Long.bitCount(reach) - full;
+        return full + contested / MOBILITY_MASK_DIVISOR;
     }
 
     // --- central outposts (tapered, white-relative) ---
