@@ -99,8 +99,15 @@ public final class Search {
     // Soft-bound (optimum time) early exit: once the root move has stopped changing
     // between iterations, further depth rarely changes the decision, so it's safe to bank
     // the unused clock time instead of confirming a result we already trust.
-    private static final double OPTIMUM_TIME_FRACTION = 0.6; // optimumTime = hardBound * 0.6
-    private static final int OPTIMUM_TIME_ASSUMED_MOVES = 45; // hardBound = remainingTime / 45
+    //
+    // optimumTimeMs is a fraction of the REAL per-move budget (softLimitMs). It was previously
+    // derived from playableTime/45 -- a per-move slice that assumed ~45 more moves at the
+    // current clock, wildly disconnected from the actual budget: on a 5-minute+increment game
+    // it produced ~2s, so the stability exit banked EVERY quiet move down to ~2s and the engine
+    // finished games with 100+ seconds unused (observed: mated with 142s in hand), never
+    // searching deep enough to notice a slow positional collapse. Anchoring it to softLimitMs
+    // makes the banking target scale with what the engine actually intends to spend.
+    private static final double OPTIMUM_TIME_FRACTION = 0.6; // optimumTime = softLimitMs * 0.6
     private static final int SOFT_BOUND_MIN_DEPTH = 5; // don't even consider exiting before this depth
     // Consecutive same-root-move iterations required before the engine trusts a "quiet"
     // position enough to bank the unused clock time. Kept deliberately high (14, not the
@@ -110,6 +117,16 @@ public final class Search {
     private static final int SOFT_BOUND_STABLE_ITERATIONS = 14;
     private static final int SOFT_BOUND_STABLE_ITERATIONS_DECISIVE = 2; // relaxed threshold once clearly winning
     private static final int SOFT_BOUND_DECISIVE_SCORE_CP = 200; // +2.00 pawns
+
+    // Volatility gate: even a stable root move must not trigger the time-banking soft exit when
+    // the position is sharp -- a forcing pawn breakthrough (e.g. ...d3+) can sit at a mild
+    // static eval for many stable iterations while the real damage lurks a few plies deeper.
+    // When the committed move is itself a breakthrough (promotion, advanced pawn push, or a
+    // check) OR the recent iteration scores are swinging, the optimum-time soft exit is
+    // suppressed so the search keeps going (still bounded by softLimitMs and the hard ceiling).
+    private static final int VOLATILITY_SWING_CP = 30;
+    private static final int VOLATILITY_WINDOW = 3;
+    private static final int BREAKTHROUGH_MIN_REL_RANK = 4; // push to the relative 5th rank or beyond
 
     // Evaluation-based time lock: a near-dead-equal root score (|score| <= this many
     // centipawns) during the opening/early middlegame (game ply < EVAL_LOCK_MAX_GAME_PLY) is
@@ -249,6 +266,7 @@ public final class Search {
     public boolean useRfp = true;
     public boolean useNullMove = true;
     public boolean useFutility = true;
+    public boolean useVolatilityGate = true; // suppress the soft early exit in sharp positions
 
     // Obvious-move pruning: skip search entirely on a forced single reply, and cut
     // iterative deepening short once a shallow iteration shows a lopsided root gap.
@@ -334,6 +352,9 @@ public final class Search {
         // it starts fresh on every search and needs no explicit reset/flush between calls.
         int previousBestMove = 0;
         int stableIterationsCount = 0;
+        // Ring buffer of the last few committed scores, for the volatility swing signal.
+        int[] recentScores = new int[VOLATILITY_WINDOW];
+        int recentScoreCount = 0;
         for (int d = 1; d <= maxDepth; d++) {
             currentDepth = d;
             int score;
@@ -420,6 +441,22 @@ public final class Search {
             }
             previousBestMove = committedMove;
 
+            // Record this iteration's score and compute the recent swing (volatility signal B).
+            recentScores[d % VOLATILITY_WINDOW] = committedScore;
+            recentScoreCount++;
+            int scoreSwing = 0;
+            if (recentScoreCount >= VOLATILITY_WINDOW) {
+                int lo = Integer.MAX_VALUE, hi = Integer.MIN_VALUE;
+                for (int s : recentScores) { if (s < lo) lo = s; if (s > hi) hi = s; }
+                scoreSwing = hi - lo;
+            }
+            // Volatility gate: a sharp committed move (promotion / advanced pawn push / check)
+            // or an unsettled recent score means the shallow-but-stable read can't be trusted,
+            // so the optimum-time soft exit is suppressed (search continues, still bounded by
+            // softLimitMs and the hard ceiling).
+            boolean volatilePos = useTime && useVolatilityGate
+                    && (isBreakthroughMove(pos, committedMove) || scoreSwing > VOLATILITY_SWING_CP);
+
             // Evaluation-based time lock (see EVAL_LOCK_* constants): active only while the
             // position is still opening/early-middlegame AND dead-equal on the board, i.e.
             // exactly the profile of a quiet position with a not-yet-visible creeping
@@ -439,12 +476,13 @@ public final class Search {
             // (b) the root move has stopped changing for several iterations in a row -- a
             // depth confirming the same move again is unlikely to change the final decision,
             // so the remaining clock time is better saved than spent re-confirming it.
-            if (evalLockActive) {
+            if (evalLockActive || volatilePos) {
                 // Explicitly clear rather than merely skip-setting: softStopArmed is a field
-                // that persists across iterations, so a prior iteration (before the lock
-                // engaged, or before committedScore dropped into the dead-equal band) could
-                // otherwise leave a stale `true` behind that checkTime() would still honor
-                // mid-iteration even though this iteration's block never re-armed it.
+                // that persists across iterations, so a prior iteration (before the lock/
+                // volatility engaged, or before committedScore dropped into the dead-equal
+                // band) could otherwise leave a stale `true` behind that checkTime() would
+                // still honor mid-iteration even though this iteration's block never re-armed
+                // it. A volatile position must never take the optimum-time soft exit.
                 softStopArmed = false;
             } else if (useTime && d >= SOFT_BOUND_MIN_DEPTH) {
                 // Acceleration rule: a decisively winning score (> +2.00 pawns) needs only 2
@@ -522,6 +560,27 @@ public final class Search {
         if (!useObviousMovePruning || depth < obviousMoveCheckDepth) return false;
         if (rootSecondBestScore <= -INF) return false; // fewer than two scored root moves
         return (rootBestScore - rootSecondBestScore) > obviousMoveMargin;
+    }
+
+    /**
+     * True if {@code move} is a "breakthrough" whose consequences a shallow-but-stable search
+     * can't be trusted to have seen: a promotion, an advanced pawn push (to the relative 5th
+     * rank or beyond), or a checking move. Used by the volatility gate to suppress the
+     * soft-bound early exit. Costs one make/unmake for the check test, run at most once per
+     * completed root iteration.
+     */
+    private boolean isBreakthroughMove(Position pos, int move) {
+        if (move == 0) return false;
+        if (Move.isPromotion(move)) return true;
+        if (Piece.type(pos.pieceAt(Move.from(move))) == Piece.PAWN) {
+            int toRank = Move.to(move) >> 3;
+            int rel = pos.sideToMove() == Piece.WHITE ? toRank : 7 - toRank;
+            if (rel >= BREAKTHROUGH_MIN_REL_RANK) return true;
+        }
+        pos.makeMove(move);
+        boolean givesCheck = pos.inCheck(pos.sideToMove());
+        pos.unmakeMove(move);
+        return givesCheck;
     }
 
     private int negamax(Position pos, int depth, int alpha, int beta, int ply, int extensions) {
@@ -1150,15 +1209,12 @@ public final class Search {
         soft = Math.min(soft, cap);
         if (soft < 1) soft = 1;
 
-        // Soft bound (Stockfish-style "optimum time"): a flat playableTime/45 approximation
-        // of a hard bound, scaled down to OPTIMUM_TIME_FRACTION of itself. This is a
-        // deliberately separate, smaller-scale estimate from the movestogo-aware soft/hard
-        // pair below -- it exists to drive the best-move stability early exit in think(),
-        // AND (see HARD_LIMIT_OPTIMUM_MULTIPLIER below) to keep the absolute hard ceiling
-        // from ballooning far beyond what the engine actually intends to spend. Computed
-        // before `hard` so the latter can be bounded relative to it.
-        long assumedHardBound = playableTime / OPTIMUM_TIME_ASSUMED_MOVES;
-        long optimum = (long) (assumedHardBound * OPTIMUM_TIME_FRACTION);
+        // Optimum time (the best-move-stability early-exit target in think()): a fraction of
+        // the REAL per-move budget `soft`, so banking scales with what the engine actually
+        // intends to spend. Also bounds the absolute hard ceiling (see
+        // HARD_LIMIT_OPTIMUM_MULTIPLIER below). Computed before `hard` so the latter can be
+        // bounded relative to it.
+        long optimum = (long) (soft * OPTIMUM_TIME_FRACTION);
         optimum = Math.min(optimum, cap);
         if (optimum < 1) optimum = 1;
 

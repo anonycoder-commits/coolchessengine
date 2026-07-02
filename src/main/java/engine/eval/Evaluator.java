@@ -61,6 +61,19 @@ public final class Evaluator {
     private static final int[] MOBILITY_MG = {0, 4, 4, 3, 1, 0};
     private static final int[] MOBILITY_EG = {0, 3, 3, 4, 2, 0};
 
+    // King-ring mobility (relative king-ring control): for each side, the net attack density
+    // over its OWN 3x3 king ring -- total bit-attacks its pieces exert on the ring (defensive
+    // coverage) minus total bit-attacks the enemy exerts on it (assault pressure). Differenced
+    // between the two sides, this measures who owns the spatial contest around the kings BEFORE
+    // any sacrifice lands, steering the engine away from suffocating shells. Heavily middlegame-
+    // weighted: king shelter matters while heavy pieces are on the board; in the endgame an
+    // active, centralized king is preferred over a sheltered one, so the eg weight is small.
+    private static final int KING_RING_MG = 4;
+    private static final int KING_RING_EG = 1;
+    // A/B toggle (static: the evaluator is a stateless utility). Flip to false to disable the
+    // term for match comparison. Shared across threads -- set once between searches, not mid-search.
+    public static boolean useKingRingMobility = true;
+
     // Weighted-mobility "Ambition" top-ups: on top of the flat per-square MOBILITY_MG/EG
     // rate above, a mobility square gets an extra bonus when it represents genuine central/
     // open-line pressure rather than just square count -- a rook eyeing an open file or a
@@ -181,6 +194,12 @@ public final class Evaluator {
         int[] outposts = evalOutposts(pos);
         mg += outposts[0];
         eg += outposts[1];
+
+        if (useKingRingMobility) {
+            int[] kingRing = evalKingRingMobility(pos);
+            mg += kingRing[0];
+            eg += kingRing[1];
+        }
 
         // Linear interpolation core: every term above (material, PST, bishop pair, rook
         // activity, pawn structure, mobility, king safety, outposts) has now fed both an mg
@@ -434,6 +453,77 @@ public final class Evaluator {
             }
         }
         return new int[] {mg, eg};
+    }
+
+    // --- king-ring mobility (tapered, white-relative) ---
+
+    /**
+     * White-relative king-ring control: {@code ringControl(WHITE) - ringControl(BLACK)},
+     * scaled into a tapered mg/eg pair. Perfectly color-symmetric -- both sides are measured
+     * by the identical procedure and differenced -- so it preserves {@code evaluate(p) ==
+     * -evaluate(mirror(p))} and stays 0 in a mirror-symmetric position such as the start.
+     */
+    private static int[] evalKingRingMobility(Position pos) {
+        int diff = ringControl(pos, WHITE) - ringControl(pos, BLACK);
+        return new int[] {diff * KING_RING_MG, diff * KING_RING_EG};
+    }
+
+    /**
+     * Net attack density over {@code kingColor}'s own 3x3 king ring: total bit-attacks that
+     * {@code kingColor}'s pieces land inside the ring (friendly coverage) minus total
+     * bit-attacks the enemy lands inside it (assault pressure). Positive = the king's own side
+     * dominates the squares around it.
+     */
+    private static int ringControl(Position pos, int kingColor) {
+        int ksq = pos.kingSquare(kingColor);
+        long ring = Attacks.KING[ksq] | (1L << ksq); // 3x3 bounding box, clipped at board edges
+        return attacksInto(pos, kingColor, ring) - attacksInto(pos, 1 - kingColor, ring);
+    }
+
+    /**
+     * Total bit-attacks from every {@code color} piece that land inside {@code ring}. Attackers
+     * are summed independently, so two pieces hitting the same ring square count twice -- this
+     * is deliberately attack *density*, not unique-square coverage. Uses only the precomputed
+     * leaper tables and the occupancy-aware slider attacks; no allocation in the loops.
+     */
+    private static int attacksInto(Position pos, int color, long ring) {
+        long occ = pos.occupied();
+        int count = 0;
+
+        long p = pos.pieces(index(color, PAWN));
+        while (p != 0) {
+            int sq = Long.numberOfTrailingZeros(p);
+            p &= p - 1;
+            count += Long.bitCount(Attacks.PAWN[color][sq] & ring);
+        }
+        long n = pos.pieces(index(color, KNIGHT));
+        while (n != 0) {
+            int sq = Long.numberOfTrailingZeros(n);
+            n &= n - 1;
+            count += Long.bitCount(Attacks.KNIGHT[sq] & ring);
+        }
+        long b = pos.pieces(index(color, BISHOP));
+        while (b != 0) {
+            int sq = Long.numberOfTrailingZeros(b);
+            b &= b - 1;
+            count += Long.bitCount(Attacks.bishop(sq, occ) & ring);
+        }
+        long r = pos.pieces(index(color, ROOK));
+        while (r != 0) {
+            int sq = Long.numberOfTrailingZeros(r);
+            r &= r - 1;
+            count += Long.bitCount(Attacks.rook(sq, occ) & ring);
+        }
+        long q = pos.pieces(index(color, QUEEN));
+        while (q != 0) {
+            int sq = Long.numberOfTrailingZeros(q);
+            q &= q - 1;
+            count += Long.bitCount(Attacks.queen(sq, occ) & ring);
+        }
+        // The king defends its own ring; the enemy king is virtually never adjacent to it.
+        count += Long.bitCount(Attacks.KING[pos.kingSquare(color)] & ring);
+
+        return count;
     }
 
     // --- piece-square table data ---
