@@ -916,6 +916,12 @@ public final class Search {
                             || history[us][Move.from(move)][Move.to(move)] >= HISTORY_MAX / 2) {
                         reduction--;
                     }
+                    // Same carve-out LMP already applies: an advanced pawn push carries slow,
+                    // long-term value that a quiet move's low history badly underrates, so it is
+                    // never reduced by more than a single ply -- reducing it 4-5 plies (as the
+                    // raw log table would at a high index) pushes exactly those strategic
+                    // resources past the horizon before the search can appreciate them.
+                    if (isAdvancedPawnPush && reduction > 1) reduction = 1;
                     if (reduction < 0) reduction = 0;
                     if (reduction > depth - 2) reduction = depth - 2;
                     searchDepth = depth - 1 - reduction;
@@ -959,15 +965,26 @@ public final class Search {
                 // plays is held to the stricter bar.
                 if (score > alpha) {
                     alpha = score;
-                    // Record this move as the head of the PV at this ply and splice the child's
-                    // PV on behind it (triangular assembly), so pvTable[0] ends up holding the
-                    // whole mainline the root intends to play.
-                    pvTable[ply][ply] = move;
-                    int childLen = pvLength[ply + 1];
-                    for (int j = ply + 1; j < childLen; j++) {
-                        pvTable[ply][j] = pvTable[ply + 1][j];
+                    // Record the PV only at PV (exact-window) nodes, and splice the child's line
+                    // only on an exact score (score < beta). A scout/non-PV node never has a
+                    // real PV, and a fail-high cutoff (score >= beta) never ran the full-window
+                    // re-search that would make pvTable[ply+1] this move's genuine continuation
+                    // -- splicing it there would graft a stale, unrelated line into the reported
+                    // PV. In that case we record just this move. This keeps `info pv` a true
+                    // principal variation; move selection (rootBestMove below) is independent of
+                    // it either way.
+                    if (isPvNode) {
+                        pvTable[ply][ply] = move;
+                        if (score < beta) {
+                            int childLen = pvLength[ply + 1];
+                            for (int j = ply + 1; j < childLen; j++) {
+                                pvTable[ply][j] = pvTable[ply + 1][j];
+                            }
+                            pvLength[ply] = childLen;
+                        } else {
+                            pvLength[ply] = ply + 1;
+                        }
                     }
-                    pvLength[ply] = childLen;
                     if (ply == 0) {
                         rootBestMove = move;
                         rootMoveCommitted = true;

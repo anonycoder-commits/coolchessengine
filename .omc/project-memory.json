@@ -96,20 +96,20 @@
   "hotPaths": [
     {
       "path": "src\\main\\java\\engine\\search\\Search.java",
-      "accessCount": 252,
-      "lastAccessed": 1783007152722,
+      "accessCount": 257,
+      "lastAccessed": 1783009277699,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\eval\\Evaluator.java",
-      "accessCount": 55,
-      "lastAccessed": 1783007077721,
+      "accessCount": 56,
+      "lastAccessed": 1783008838246,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\uci\\Uci.java",
-      "accessCount": 38,
-      "lastAccessed": 1782999571681,
+      "accessCount": 41,
+      "lastAccessed": 1783009298676,
       "type": "file"
     },
     {
@@ -138,8 +138,8 @@
     },
     {
       "path": "src\\main\\java\\engine\\board\\Move.java",
-      "accessCount": 12,
-      "lastAccessed": 1782992649405,
+      "accessCount": 13,
+      "lastAccessed": 1783008929367,
       "type": "file"
     },
     {

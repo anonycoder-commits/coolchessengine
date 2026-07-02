@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import engine.board.Move;
 import engine.board.MoveGenerator;
@@ -109,6 +110,7 @@ public final class Uci {
                     engine.tools.Bench.run();
                     break;
                 case "quit":
+                    shutdownSearch();
                     return;
                 default:
                     // Unknown command: ignore, per UCI convention.
@@ -116,6 +118,25 @@ public final class Uci {
             }
             System.out.flush();
         }
+    }
+
+    /**
+     * Stops any in-flight search and waits for the search thread to finish before we let the
+     * process exit. Without this, {@code quit} returns immediately and the JVM tears down the
+     * daemon search thread mid-{@code println}, emitting a truncated {@code info ...} line
+     * (e.g. "info depth 5 score cp 0" with no newline) that a UCI wrapper's info parser then
+     * chokes on. Bounded so a wedged search can never hang the shutdown.
+     */
+    private void shutdownSearch() {
+        search.requestStop();
+        if (smp != null) smp.requestStop();
+        searchExecutor.shutdown();
+        try {
+            searchExecutor.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        System.out.flush();
     }
 
     /** Handles {@code setoption name <id> [value <x>]}; unknown options are ignored per UCI convention. */
