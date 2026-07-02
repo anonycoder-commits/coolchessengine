@@ -128,8 +128,15 @@ public final class Search {
     // Soft-bound (optimum time) early exit: once the root move has stopped changing
     // between iterations, further depth rarely changes the decision, so it's safe to bank
     // the unused clock time instead of confirming a result we already trust.
-    private static final double OPTIMUM_TIME_FRACTION = 0.6; // optimumTime = hardBound * 0.6
-    private static final int OPTIMUM_TIME_ASSUMED_MOVES = 45; // hardBound = remainingTime / 45
+    //
+    // optimumTimeMs is a fraction of the REAL per-move budget (softLimitMs). It was previously
+    // derived from playableTime/45 -- a per-move slice that assumed ~45 more moves at the
+    // current clock, wildly disconnected from the actual budget: on a 5-minute+increment game
+    // it produced ~2s, so the stability exit banked EVERY quiet move down to ~2s and the engine
+    // finished games with 100+ seconds unused (observed: mated with 142s in hand), never
+    // searching deep enough to notice a slow positional collapse. Anchoring it to softLimitMs
+    // makes the banking target scale with what the engine actually intends to spend.
+    private static final double OPTIMUM_TIME_FRACTION = 0.6; // optimumTime = softLimitMs * 0.6
     private static final int SOFT_BOUND_MIN_DEPTH = 5; // don't even consider exiting before this depth
     // Consecutive same-root-move iterations required before the engine trusts a "quiet"
     // position enough to bank the unused clock time. Kept deliberately high (14, not the
@@ -1498,15 +1505,12 @@ public final class Search {
         soft = Math.min(soft, cap);
         if (soft < 1) soft = 1;
 
-        // Soft bound (Stockfish-style "optimum time"): a flat playableTime/45 approximation
-        // of a hard bound, scaled down to OPTIMUM_TIME_FRACTION of itself. This is a
-        // deliberately separate, smaller-scale estimate from the movestogo-aware soft/hard
-        // pair below -- it exists to drive the best-move stability early exit in think(),
-        // AND (see HARD_LIMIT_OPTIMUM_MULTIPLIER below) to keep the absolute hard ceiling
-        // from ballooning far beyond what the engine actually intends to spend. Computed
-        // before `hard` so the latter can be bounded relative to it.
-        long assumedHardBound = playableTime / OPTIMUM_TIME_ASSUMED_MOVES;
-        long optimum = (long) (assumedHardBound * OPTIMUM_TIME_FRACTION);
+        // Optimum time (the best-move-stability early-exit target in think()): a fraction of
+        // the REAL per-move budget `soft`, so banking scales with what the engine actually
+        // intends to spend. Also bounds the absolute hard ceiling (see
+        // HARD_LIMIT_OPTIMUM_MULTIPLIER below). Computed before `hard` so the latter can be
+        // bounded relative to it.
+        long optimum = (long) (soft * OPTIMUM_TIME_FRACTION);
         optimum = Math.min(optimum, cap);
         if (optimum < 1) optimum = 1;
 
