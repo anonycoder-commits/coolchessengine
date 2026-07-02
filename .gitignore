@@ -1,3 +1,34 @@
+# --- build artifacts ---
 build/
 .gradle/
+out/
+*.class
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.iml
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+
+# --- Python (lichess-bot) ---
 lichess-bot/config.yml
+lichess-bot/__pycache__/
+lichess-bot/**/__pycache__/
+lichess-bot/*.log
+lichess-bot/lichess_bot_auto_logs/
+lichess-bot/venv/
+lichess-bot/.venv/
+*.pyc
+
+# --- data / non-source ---
+*.csv
+*.pgn
+*.epd
+*.bin
+*.dat
+*.db
+*.nnue
+*.log
