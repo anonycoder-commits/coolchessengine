@@ -380,4 +380,26 @@ public final class Position {
     public long pieces(int pieceIndex) { return bb[pieceIndex]; }
     public long occupied() { return occupied; }
     public long occupied(int color) { return occByColor[color]; }
+
+    /**
+     * Loads only the state a STATIC evaluation reads -- the 12 piece bitboards, side to move,
+     * and halfmove clock -- recomputing occupancy from the bitboards and skipping the whole
+     * search/undo machinery. {@code board[]}, castling, ep and the undo stacks are left as-is
+     * (the evaluator never reads them). This lets an offline tool (e.g. {@link engine.tools}'s
+     * tuner) evaluate millions of corpus positions by reusing one Position per thread instead
+     * of allocating a full ~48KB Position each, without going through FEN parsing.
+     *
+     * <p>NOT valid for search or move generation afterwards -- only for {@code Evaluator.evaluate}.
+     * {@code bb12} is indexed as {@code index(color, type)} (white P..K = 0..5, black = 6..11).
+     */
+    public void loadForEval(long[] bb12, int stm, int halfmove) {
+        long white = 0L, black = 0L;
+        for (int i = 0; i < 6; i++) { bb[i] = bb12[i]; white |= bb12[i]; }
+        for (int i = 6; i < 12; i++) { bb[i] = bb12[i]; black |= bb12[i]; }
+        occByColor[0] = white;
+        occByColor[1] = black;
+        occupied = white | black;
+        sideToMove = stm;
+        halfmoveClock = halfmove;
+    }
 }

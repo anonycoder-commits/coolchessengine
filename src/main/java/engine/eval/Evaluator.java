@@ -30,7 +30,7 @@ public final class Evaluator {
     // destabilizes node counts between iterations. Added to the side-to-move-relative score,
     // so it is deliberately NOT color-symmetric the way the board terms are (see
     // EvalSymmetryTest, which subtracts it out before checking antisymmetry).
-    public static final int TEMPO = 15;
+    public static int TEMPO = 15;
 
     // --- pawn structure / king safety / mobility weights ---
     // Every term below is a genuine MG/EG *pair* (not a single flat value split by eye) --
@@ -42,27 +42,27 @@ public final class Evaluator {
     // phase blend, as this evaluator previously did, meant every one of them applied at full
     // strength in a bare king-and-pawn endgame exactly as if the queens were still on the
     // board, which is the classic "endgame bleeding" failure mode this refactor fixes.
-    private static final int DOUBLED_MG = 12;
-    private static final int DOUBLED_EG = 20;
-    private static final int ISOLATED_MG = 14;
-    private static final int ISOLATED_EG = 10;
+    public static int DOUBLED_MG = 12;
+    public static int DOUBLED_EG = 20;
+    public static int ISOLATED_MG = 14;
+    public static int ISOLATED_EG = 10;
     // Passed-pawn bonus indexed by the pawn's rank relative to its own side (0..7). EG ramps
     // far more steeply toward the promotion rank: with no pieces left to blockade or round up
     // a passer, a pawn on the 6th/7th is close to a second queen, not just a small edge.
-    private static final int[] PASSED_MG = {0, 5, 8, 12, 20, 32, 50, 0};
-    private static final int[] PASSED_EG = {0, 10, 18, 30, 50, 90, 150, 0};
+    public static int[] PASSED_MG = {0, 5, 8, 12, 20, 32, 50, 0};
+    public static int[] PASSED_EG = {0, 10, 18, 30, 50, 90, 150, 0};
 
     // King-safety shield/file terms are an almost purely midgame concept -- they price in the
     // danger of enemy queen/rook fire down an open line at the king, which stops mattering
     // once those attackers are gone. EG values are small, not zero, since a king still prefers
     // some cover against a lone rook/queen endgame, but nowhere near midgame weight; EG king
     // placement is instead driven by EG_PST[KING] rewarding centralization (see initPst()).
-    private static final int SHIELD_MG = 8;
-    private static final int SHIELD_EG = 2;
-    private static final int OPEN_FILE_MG = 20;
-    private static final int OPEN_FILE_EG = 4;
-    private static final int SEMI_OPEN_FILE_MG = 10;
-    private static final int SEMI_OPEN_FILE_EG = 3;
+    public static int SHIELD_MG = 8;
+    public static int SHIELD_EG = 2;
+    public static int OPEN_FILE_MG = 20;
+    public static int OPEN_FILE_EG = 4;
+    public static int SEMI_OPEN_FILE_MG = 10;
+    public static int SEMI_OPEN_FILE_EG = 3;
 
     // King-attack ("attack units"): each enemy piece bearing on the squares around a king
     // contributes units weighted by piece type and by how many king-zone squares it hits; the
@@ -70,7 +70,7 @@ public final class Evaluator {
     // is what lets the engine value a building attack BEFORE tactics force it into qsearch,
     // rather than reading sharp middlegames as flat. Requires >= 2 attackers (a lone piece near
     // the king is not a real threat) and is almost purely a middlegame concern (small eg).
-    private static final int[] KING_ATTACK_WEIGHT = {0, 2, 2, 3, 5, 0}; // by piece TYPE
+    public static int[] KING_ATTACK_WEIGHT = {0, 2, 2, 3, 5, 0}; // by piece TYPE
     private static final int KING_ATTACK_DIVISOR = 6;   // penalty = min(units*units/DIVISOR, CAP)
     private static final int KING_ATTACK_CAP = 400;     // ceiling so one lopsided node can't dominate
     private static final int KING_ATTACK_EG_SHIFT = 4;  // eg penalty = mg penalty >> this (small)
@@ -87,13 +87,13 @@ public final class Evaluator {
     // Bad bishop: a bishop hemmed in by its own pawns fixed on its square color is a lasting
     // structural liability, worse in the endgame where it can't be traded off into activity.
     private static final long LIGHT_SQUARES = 0x55AA55AA55AA55AAL;
-    private static final int BAD_BISHOP_MG = 3; // per own pawn on the bishop's square color
-    private static final int BAD_BISHOP_EG = 5;
+    public static int BAD_BISHOP_MG = 3; // per own pawn on the bishop's square color
+    public static int BAD_BISHOP_EG = 5;
 
     // Mobility by piece TYPE: rooks/queens gain relative value in the endgame (open lines
     // decide races once material thins out), while knights/bishops taper down slightly.
-    private static final int[] MOBILITY_MG = {0, 4, 4, 3, 1, 0};
-    private static final int[] MOBILITY_EG = {0, 3, 3, 4, 2, 0};
+    public static int[] MOBILITY_MG = {0, 4, 4, 3, 1, 0};
+    public static int[] MOBILITY_EG = {0, 3, 3, 4, 2, 0};
     // Mobility floor: squares a piece reaches that are contested only by an enemy PAWN still
     // count, at reduced weight (1/this), instead of being masked out entirely. Without it, a
     // closed position where enemy pawns blanket the board collapses both sides' mobility to
@@ -106,20 +106,20 @@ public final class Evaluator {
     // attacks an enemy pawn, or is a single push from attacking one. The side with more levers
     // holds the initiative to open the position on its own terms, the factor flat mobility is
     // blind to in closed structures. Tapered mg-heavy (opening matters most with pieces on).
-    private static final int LEVER_MG = 6;
-    private static final int LEVER_EG = 3;
+    public static int LEVER_MG = 6;
+    public static int LEVER_EG = 3;
 
     // Passed-pawn king proximity (endgame only): a passer's value in the endgame depends
     // heavily on which king can reach its promotion square first, which pure rank scaling
     // ignores. Rewards the friendly king being close and the enemy king being far, weighted
     // by how advanced the passer already is.
-    private static final int PASSER_KING_EG = 5;
+    public static int PASSER_KING_EG = 5;
 
     // Connected/phalanx pawn bonus and backward-pawn penalty (small, standard mg/eg pairs).
-    private static final int CONNECTED_MG = 8;
-    private static final int CONNECTED_EG = 6;
-    private static final int BACKWARD_MG = 10;
-    private static final int BACKWARD_EG = 14;
+    public static int CONNECTED_MG = 8;
+    public static int CONNECTED_EG = 6;
+    public static int BACKWARD_MG = 10;
+    public static int BACKWARD_EG = 14;
 
     // Endgame scale factor (out of SCALE_MAX): the eg score is multiplied by this before the
     // phase blend, to reflect that some material configurations are far more drawish than raw
@@ -133,8 +133,8 @@ public final class Evaluator {
     // any sacrifice lands, steering the engine away from suffocating shells. Heavily middlegame-
     // weighted: king shelter matters while heavy pieces are on the board; in the endgame an
     // active, centralized king is preferred over a sheltered one, so the eg weight is small.
-    private static final int KING_RING_MG = 4;
-    private static final int KING_RING_EG = 1;
+    public static int KING_RING_MG = 4;
+    public static int KING_RING_EG = 1;
     // A/B toggle (static: the evaluator is a stateless utility). Flip to false to disable the
     // term for match comparison. Shared across threads -- set once between searches, not mid-search.
     public static boolean useKingRingMobility = true;
@@ -145,14 +145,14 @@ public final class Evaluator {
     // knight/bishop hitting a center square is worth more than an equally-mobile piece
     // shuffling along the back rank. Added on top of (not instead of) the base rate, so total
     // weight for a "premium" square is MOBILITY_*[type] + the matching bonus below.
-    private static final int ROOK_OPEN_FILE_MOBILITY_MG = 3;
-    private static final int ROOK_OPEN_FILE_MOBILITY_EG = 2;
-    private static final int QUEEN_OPEN_FILE_MOBILITY_MG = 2;
-    private static final int QUEEN_OPEN_FILE_MOBILITY_EG = 2;
-    private static final int KNIGHT_CENTER_MOBILITY_MG = 6;
-    private static final int KNIGHT_CENTER_MOBILITY_EG = 4;
-    private static final int BISHOP_CENTER_MOBILITY_MG = 5;
-    private static final int BISHOP_CENTER_MOBILITY_EG = 3;
+    public static int ROOK_OPEN_FILE_MOBILITY_MG = 3;
+    public static int ROOK_OPEN_FILE_MOBILITY_EG = 2;
+    public static int QUEEN_OPEN_FILE_MOBILITY_MG = 2;
+    public static int QUEEN_OPEN_FILE_MOBILITY_EG = 2;
+    public static int KNIGHT_CENTER_MOBILITY_MG = 6;
+    public static int KNIGHT_CENTER_MOBILITY_EG = 4;
+    public static int BISHOP_CENTER_MOBILITY_MG = 5;
+    public static int BISHOP_CENTER_MOBILITY_EG = 3;
 
     // Central outposts: a knight or bishop parked on d4/d5/e4/e5 that no enemy pawn can ever
     // structurally challenge (see outpostScore()) is a long-term thorn the opponent can't
@@ -161,10 +161,10 @@ public final class Evaluator {
     // square purely to reduce short-term tactical exposure. Knights get the larger bonus
     // since, unlike bishops, they have no long-diagonal alternative outlet once parked.
     private static final long CENTER_SQUARES = (1L << 27) | (1L << 28) | (1L << 35) | (1L << 36); // d4,e4,d5,e5
-    private static final int OUTPOST_KNIGHT_MG = 18;
-    private static final int OUTPOST_KNIGHT_EG = 12;
-    private static final int OUTPOST_BISHOP_MG = 12;
-    private static final int OUTPOST_BISHOP_EG = 8;
+    public static int OUTPOST_KNIGHT_MG = 18;
+    public static int OUTPOST_KNIGHT_EG = 12;
+    public static int OUTPOST_BISHOP_MG = 12;
+    public static int OUTPOST_BISHOP_EG = 8;
 
     // Threats: concrete tactical pressure the mobility/space terms are blind to. Three
     // signals, each color-differenced: an enemy piece under attack by a pawn (the cheapest
@@ -172,12 +172,12 @@ public final class Evaluator {
     // (attacked by anything, defended by nothing), and a safe pawn push that would attack a
     // piece next move (initiative the opponent must spend a tempo answering).
     // THREAT_BY_PAWN is indexed by the attacked piece's TYPE.
-    private static final int[] THREAT_BY_PAWN_MG = {0, 30, 30, 40, 45, 0};
-    private static final int[] THREAT_BY_PAWN_EG = {0, 22, 22, 28, 32, 0};
-    private static final int HANGING_MG = 22;
-    private static final int HANGING_EG = 18;
-    private static final int PAWN_PUSH_THREAT_MG = 12;
-    private static final int PAWN_PUSH_THREAT_EG = 8;
+    public static int[] THREAT_BY_PAWN_MG = {0, 30, 30, 40, 45, 0};
+    public static int[] THREAT_BY_PAWN_EG = {0, 22, 22, 28, 32, 0};
+    public static int HANGING_MG = 22;
+    public static int HANGING_EG = 18;
+    public static int PAWN_PUSH_THREAT_MG = 12;
+    public static int PAWN_PUSH_THREAT_EG = 8;
     // A/B toggle (see useKingRingMobility for the sharing convention).
     public static boolean useThreats = true;
 
@@ -189,8 +189,8 @@ public final class Evaluator {
     // -2 -> -4 -> -6.7 in three moves). Indexed by the pawn's rank distance ahead of the
     // king from the king's own perspective (1 = adjacent rank); mg-heavy since storms need
     // pieces behind them to matter.
-    private static final int[] STORM_MG = {0, 28, 16, 8};
-    private static final int[] STORM_EG = {0, 8, 4, 2};
+    public static int[] STORM_MG = {0, 28, 16, 8};
+    public static int[] STORM_EG = {0, 8, 4, 2};
     private static final int STORM_MAX_DIST = 3;
     public static boolean useKingPawnStorm = true;
 
@@ -211,7 +211,7 @@ public final class Evaluator {
     // tactical loan against the king -- counted into the attack-unit total (per checking piece
     // TYPE) before the super-linear danger formula, so imminent check threats raise danger
     // even before any capture sequence exists for qsearch to see.
-    private static final int[] SAFE_CHECK_WEIGHT = {0, 3, 2, 3, 4, 0};
+    public static int[] SAFE_CHECK_WEIGHT = {0, 3, 2, 3, 4, 0};
     public static boolean useSafeChecks = true;
 
     // Mating-technique drive ("mop-up"): with overwhelming material against a near-bare king,
@@ -229,20 +229,20 @@ public final class Evaluator {
 
     // --- bishop pair / rook activity weights (tapered: separate mg/eg, unlike the flat
     // pawn/mobility/king-safety terms above) ---
-    private static final int BISHOP_PAIR_MG = 15;
-    private static final int BISHOP_PAIR_EG = 30;
+    public static int BISHOP_PAIR_MG = 15;
+    public static int BISHOP_PAIR_EG = 30;
 
-    private static final int ROOK_OPEN_FILE_MG = 20;
-    private static final int ROOK_OPEN_FILE_EG = 15;
-    private static final int ROOK_SEMI_OPEN_FILE_MG = 10;
-    private static final int ROOK_SEMI_OPEN_FILE_EG = 10;
-    private static final int ROOK_7TH_MG = 25;
-    private static final int ROOK_7TH_EG = 40;
+    public static int ROOK_OPEN_FILE_MG = 20;
+    public static int ROOK_OPEN_FILE_EG = 15;
+    public static int ROOK_SEMI_OPEN_FILE_MG = 10;
+    public static int ROOK_SEMI_OPEN_FILE_EG = 10;
+    public static int ROOK_7TH_MG = 25;
+    public static int ROOK_7TH_EG = 40;
     // Rook behind a passed pawn (Tarrasch's rule): a rook on the same file as, and behind,
     // an own passed pawn supports its advance the whole way to promotion. Endgame-heavy --
     // the motif is decisive in rook endings, minor in the middlegame. Toggleable for A/B.
-    private static final int ROOK_BEHIND_PASSER_MG = 5;
-    private static final int ROOK_BEHIND_PASSER_EG = 20;
+    public static int ROOK_BEHIND_PASSER_MG = 5;
+    public static int ROOK_BEHIND_PASSER_EG = 20;
     // Default OFF (data-driven, see Search.useCaptureHistory note): chess-theoretically sound
     // and cheap after the rooks!=0 guard, but no referee-gate evidence of gain at fast TC.
     public static boolean useRookBehindPasser = false;
