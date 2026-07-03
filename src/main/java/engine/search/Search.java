@@ -455,7 +455,11 @@ public final class Search {
 
     /** Arms ponder mode for the next {@link #think}; cleared by {@link #ponderHit} or a stop. */
     public void setPondering(boolean p) { pondering = p; }
-    public boolean useCorrectionHistory = true; // pawn-structure-keyed static-eval correction
+    // Default OFF (data-driven): shipped enabled earlier on a biased-harness 56.9%, but a clean
+    // unbiased referee re-gate scored corrHist-on at 48.2%/300 games (Elo -13, CI [-52,27]) --
+    // no evidence of gain at 100ms/move. Theoretically sound (standard in strong engines) and
+    // may pay off at slower TC or after eval tuning, so the code stays as a retest candidate.
+    public boolean useCorrectionHistory = false; // pawn-structure-keyed static-eval correction
 
     // Obvious-move pruning: skip search entirely on a forced single reply, and cut
     // iterative deepening short once a shallow iteration shows a lopsided root gap.
