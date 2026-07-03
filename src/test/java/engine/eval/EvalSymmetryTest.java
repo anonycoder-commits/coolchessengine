@@ -30,6 +30,10 @@ class EvalSymmetryTest {
         "2r3k1/pp3ppp/2n1b3/q7/3P4/2P1B3/P1Q2PPP/3R2K1 w - - 0 1",
         "8/5pk1/6p1/8/8/1P6/P4PPP/6K1 b - - 0 1",
         "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 1",
+        // Overwhelming-material endgames that exercise the mating-drive term's symmetry:
+        // KQ vs lone K (cornered king), and KR vs K+N (near-bare defender), both sides to move.
+        "7k/8/6K1/8/8/8/8/Q7 w - - 0 1",
+        "8/8/8/4k3/8/2n5/8/K1R5 b - - 0 1",
     };
 
     /** Vertical flip + color swap, keeping the side-to-move letter unchanged. */

@@ -73,6 +73,7 @@ public final class Uci {
                     System.out.println("id author " + AUTHOR);
                     System.out.println("option name Hash type spin default 16 min 1 max 1024");
                     System.out.println("option name Threads type spin default 1 min 1 max " + MAX_THREADS);
+                    System.out.println("option name Ponder type check default false");
                     System.out.println("uciok");
                     break;
                 case "isready":
@@ -101,6 +102,12 @@ public final class Uci {
                             }
                         });
                     }
+                    break;
+                case "ponderhit":
+                    // Opponent played the predicted move: hand the still-running ponder search
+                    // over to normal time management (clock rebased to now inside ponderHit).
+                    search.ponderHit();
+                    if (smp != null) smp.ponderHit();
                     break;
                 case "stop":
                     search.requestStop();
@@ -190,8 +197,10 @@ public final class Uci {
     private void handleGo(String[] tokens) {
         SearchLimits limits = new SearchLimits();
         boolean anyLimit = false;
+        boolean ponder = false;
         for (int i = 1; i < tokens.length; i++) {
             switch (tokens[i]) {
+                case "ponder": ponder = true; break;
                 case "depth": limits.depth = parseInt(tokens, ++i); anyLimit = true; break;
                 case "movetime": limits.movetime = parseInt(tokens, ++i); anyLimit = true; break;
                 case "wtime": limits.wtime = parseInt(tokens, ++i); anyLimit = true; break;
@@ -207,17 +216,27 @@ public final class Uci {
 
         int best;
         boolean bypassPrinted;
+        int ponderMove = 0;
         if (threads <= 1) {
+            // Ponder mode is wired for the single-threaded path (the common bot configuration);
+            // the flag makes think() ignore the clock until "ponderhit" rebases it. See Search.
+            search.setPondering(ponder);
             best = search.think(position, limits);
             bypassPrinted = search.bypassPrinted;
+            ponderMove = search.ponderMove();
         } else {
             if (smp == null || smp.threadCount() != threads) smp = new LazySmpSearch(threads, tt);
+            smp.setPondering(ponder);
             best = smp.think(position, limits);
             bypassPrinted = smp.bypassPrinted;
+            ponderMove = smp.ponderMove();
         }
         if (bypassPrinted) return; // the search already emitted bestmove for the forced-move case
         String pv = best != 0 ? Move.toUci(best) : "0000";
-        System.out.println("bestmove " + pv);
+        // Offer a ponder move so a pondering GUI can search the opponent's expected reply.
+        System.out.println(ponderMove != 0
+                ? "bestmove " + pv + " ponder " + Move.toUci(ponderMove)
+                : "bestmove " + pv);
     }
 
     private static int parseInt(String[] tokens, int idx) {

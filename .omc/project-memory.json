@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1782907922200,
+  "lastScanned": 1783015027930,
   "projectRoot": "C:\\Users\\svjat\\dev\\chess engine",
   "techStack": {
     "languages": [
@@ -36,7 +36,10 @@
     "mainDirectories": [
       "src"
     ],
-    "gitBranches": null
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
   },
   "customNotes": [],
   "directoryMap": {
@@ -44,21 +47,21 @@
       "path": "build",
       "purpose": "Build output",
       "fileCount": 0,
-      "lastAccessed": 1782907922182,
+      "lastAccessed": 1783015027905,
       "keyFiles": []
     },
     "gradle": {
       "path": "gradle",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1782907922183,
+      "lastAccessed": 1783015027906,
       "keyFiles": []
     },
     "lichess-bot": {
       "path": "lichess-bot",
       "purpose": null,
       "fileCount": 12,
-      "lastAccessed": 1782907922183,
+      "lastAccessed": 1783015027906,
       "keyFiles": [
         "CITATION.cff",
         "config.yml",
@@ -71,14 +74,24 @@
       "path": "src",
       "purpose": "Source code",
       "fileCount": 0,
-      "lastAccessed": 1782907922184,
+      "lastAccessed": 1783015027906,
       "keyFiles": []
+    },
+    "build\\scripts": {
+      "path": "build\\scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 2,
+      "lastAccessed": 1783015027907,
+      "keyFiles": [
+        "chess-engine",
+        "chess-engine.bat"
+      ]
     },
     "lichess-bot\\docs": {
       "path": "lichess-bot\\docs",
       "purpose": "Documentation",
       "fileCount": 3,
-      "lastAccessed": 1782907922184,
+      "lastAccessed": 1783015027908,
       "keyFiles": [
         "CODE_OF_CONDUCT.md",
         "CONTRIBUTING.md",
@@ -89,309 +102,123 @@
       "path": "src\\test",
       "purpose": "Test files",
       "fileCount": 0,
-      "lastAccessed": 1782907922185,
+      "lastAccessed": 1783015027908,
       "keyFiles": []
     }
   },
   "hotPaths": [
     {
       "path": "src\\main\\java\\engine\\search\\Search.java",
-      "accessCount": 264,
-      "lastAccessed": 1783010617244,
+      "accessCount": 143,
+      "lastAccessed": 1783098877315,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\eval\\Evaluator.java",
-      "accessCount": 63,
-      "lastAccessed": 1783010700840,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\uci\\Uci.java",
-      "accessCount": 41,
-      "lastAccessed": 1783009298676,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\board\\Position.java",
-      "accessCount": 23,
-      "lastAccessed": 1782992913243,
+      "accessCount": 47,
+      "lastAccessed": 1783098879459,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\search\\LazySmpSearch.java",
-      "accessCount": 23,
-      "lastAccessed": 1782998279815,
-      "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\search\\SearchPhase2Test.java",
-      "accessCount": 22,
-      "lastAccessed": 1783001634641,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\board\\MoveGenerator.java",
-      "accessCount": 14,
-      "lastAccessed": 1782992891045,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\board\\Move.java",
       "accessCount": 13,
-      "lastAccessed": 1783008929367,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\search\\HandcraftedEvaluator.java",
-      "accessCount": 10,
-      "lastAccessed": 1782998295502,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\search\\TranspositionTable.java",
-      "accessCount": 10,
-      "lastAccessed": 1783000601397,
-      "type": "file"
-    },
-    {
-      "path": "src",
-      "accessCount": 10,
-      "lastAccessed": 1783000841609,
-      "type": "directory"
-    },
-    {
-      "path": "src\\main\\java\\engine\\tune\\CorpusReader.java",
-      "accessCount": 9,
-      "lastAccessed": 1782932547245,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\board\\Attacks.java",
-      "accessCount": 9,
-      "lastAccessed": 1782994484267,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\tune\\Tuner.java",
-      "accessCount": 8,
-      "lastAccessed": 1782932942626,
-      "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\search\\TranspositionTableConcurrencyTest.java",
-      "accessCount": 8,
-      "lastAccessed": 1783000867030,
-      "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\search\\LazySmpSearchTest.java",
-      "accessCount": 7,
-      "lastAccessed": 1782936009872,
-      "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\search\\SeeTest.java",
-      "accessCount": 6,
-      "lastAccessed": 1782936017187,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\board\\Piece.java",
-      "accessCount": 6,
-      "lastAccessed": 1782992649455,
+      "lastAccessed": 1783094912319,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\tools\\MatchRunner.java",
+      "accessCount": 12,
+      "lastAccessed": 1783092070039,
+      "type": "file"
+    },
+    {
+      "path": "src\\test\\java\\engine\\search\\MateTimeManagementTest.java",
+      "accessCount": 10,
+      "lastAccessed": 1783034303380,
+      "type": "file"
+    },
+    {
+      "path": "src\\test\\java\\engine\\eval\\EvalRegressionTest.java",
+      "accessCount": 10,
+      "lastAccessed": 1783098891805,
+      "type": "file"
+    },
+    {
+      "path": "src\\test\\java\\engine\\search\\SearchPhase2Test.java",
+      "accessCount": 9,
+      "lastAccessed": 1783035751490,
+      "type": "directory"
+    },
+    {
+      "path": "src\\main\\java\\engine\\uci\\Uci.java",
       "accessCount": 6,
-      "lastAccessed": 1782998908056,
-      "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\tune\\TunerTest.java",
-      "accessCount": 5,
-      "lastAccessed": 1782932946850,
-      "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\board\\PositionCopyTest.java",
-      "accessCount": 4,
-      "lastAccessed": 1782917000418,
-      "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\tune\\CorpusReaderTest.java",
-      "accessCount": 4,
-      "lastAccessed": 1782931373898,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\tune\\TuningPosition.java",
-      "accessCount": 4,
-      "lastAccessed": 1782932547542,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\search\\SearchLimits.java",
-      "accessCount": 4,
-      "lastAccessed": 1782935304400,
-      "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\search\\SearchTest.java",
-      "accessCount": 4,
-      "lastAccessed": 1782998301390,
+      "lastAccessed": 1783094937337,
       "type": "directory"
     },
     {
-      "path": "src\\test\\java\\engine\\search\\TimeManagementTest.java",
+      "path": "src\\main\\java\\engine\\board\\Position.java",
       "accessCount": 4,
-      "lastAccessed": 1783006935731,
-      "type": "file"
+      "lastAccessed": 1783033948529,
+      "type": "directory"
     },
     {
-      "path": "src\\test",
+      "path": "src\\test\\java\\engine\\eval\\EvalSymmetryTest.java",
       "accessCount": 3,
-      "lastAccessed": 1782932288270,
-      "type": "directory"
+      "lastAccessed": 1783029808612,
+      "type": "file"
     },
     {
       "path": "src\\test\\java\\engine\\uci\\UciProtocolTest.java",
       "accessCount": 3,
-      "lastAccessed": 1782936009482,
+      "lastAccessed": 1783095188447,
+      "type": "directory"
+    },
+    {
+      "path": "src\\test\\java\\engine\\search\\SearchTest.java",
+      "accessCount": 2,
+      "lastAccessed": 1783015829896,
+      "type": "directory"
+    },
+    {
+      "path": "src\\main\\java\\engine\\search\\HandcraftedEvaluator.java",
+      "accessCount": 2,
+      "lastAccessed": 1783018316265,
       "type": "file"
     },
     {
-      "path": "lichess-bot\\wiki\\How-to-Run-lichess‐bot.md",
-      "accessCount": 2,
-      "lastAccessed": 1782909058272,
-      "type": "directory"
-    },
-    {
-      "path": "lichess-bot\\config.yml",
-      "accessCount": 2,
-      "lastAccessed": 1782909985642,
+      "path": "src\\main\\java\\engine\\search\\TranspositionTable.java",
+      "accessCount": 1,
+      "lastAccessed": 1783015049414,
       "type": "file"
     },
     {
-      "path": "src\\main\\java",
-      "accessCount": 2,
-      "lastAccessed": 1782917000107,
-      "type": "directory"
-    },
-    {
-      "path": "lichess-bot",
-      "accessCount": 2,
-      "lastAccessed": 1782922241927,
-      "type": "directory"
-    },
-    {
-      "path": "src\\main\\java\\engine\\tune\\package-info.java",
-      "accessCount": 2,
-      "lastAccessed": 1782925603092,
+      "path": "src\\test\\java\\engine\\search\\TimeManagementTest.java",
+      "accessCount": 1,
+      "lastAccessed": 1783015556638,
       "type": "file"
     },
     {
-      "path": "src\\main\\java\\engine\\board",
-      "accessCount": 2,
-      "lastAccessed": 1782935115518,
-      "type": "directory"
-    },
-    {
-      "path": "src\\main\\java\\engine\\board\\MoveList.java",
-      "accessCount": 2,
-      "lastAccessed": 1782935303080,
+      "path": "src\\main\\java\\engine\\tools\\Bench.java",
+      "accessCount": 1,
+      "lastAccessed": 1783015962458,
       "type": "file"
     },
     {
-      "path": "src/test/java/engine/search/SearchPhase2Test.java",
-      "accessCount": 2,
-      "lastAccessed": 1782974424749,
-      "type": "directory"
-    },
-    {
-      "path": "src\\main\\java\\engine\\search\\Evaluator.java",
-      "accessCount": 2,
-      "lastAccessed": 1782981975494,
+      "path": "src\\main\\java\\engine\\board\\Piece.java",
+      "accessCount": 1,
+      "lastAccessed": 1783017596128,
       "type": "file"
     },
     {
-      "path": "src\\main\\java\\engine\\board\\Zobrist.java",
-      "accessCount": 2,
-      "lastAccessed": 1782992646004,
+      "path": "src\\test\\java\\engine\\search\\PvIntegrityTest.java",
+      "accessCount": 1,
+      "lastAccessed": 1783023740434,
       "type": "file"
     },
     {
-      "path": "src\\test\\java\\engine\\board\\MakeUnmakeTest.java",
-      "accessCount": 2,
-      "lastAccessed": 1782992654525,
-      "type": "file"
-    },
-    {
-      "path": "src\\test\\java\\engine\\search\\HandcraftedEvaluatorTest.java",
-      "accessCount": 2,
-      "lastAccessed": 1783001178358,
-      "type": "file"
-    },
-    {
-      "path": "lichess-bot\\README.md",
+      "path": "src\\main\\java\\engine\\board\\MoveGenerator.java",
       "accessCount": 1,
-      "lastAccessed": 1782909043673,
-      "type": "directory"
-    },
-    {
-      "path": "lichess-bot\\wiki\\Configure-lichess-bot.md",
-      "accessCount": 1,
-      "lastAccessed": 1782909966579,
-      "type": "directory"
-    },
-    {
-      "path": "src\\main\\java\\engine",
-      "accessCount": 1,
-      "lastAccessed": 1782916292552,
-      "type": "directory"
-    },
-    {
-      "path": "lichess-bot\\lib\\engine_wrapper.py",
-      "accessCount": 1,
-      "lastAccessed": 1782922254430,
-      "type": "directory"
-    },
-    {
-      "path": "src\\main\\java\\engine\\eval\\package-info.java",
-      "accessCount": 1,
-      "lastAccessed": 1782925137318,
-      "type": "file"
-    },
-    {
-      "path": "positions.csv",
-      "accessCount": 1,
-      "lastAccessed": 1782925690548,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\search",
-      "accessCount": 1,
-      "lastAccessed": 1782935116289,
-      "type": "directory"
-    },
-    {
-      "path": "src/main/java/engine/search/Search.java",
-      "accessCount": 1,
-      "lastAccessed": 1782974302212,
-      "type": "directory"
-    },
-    {
-      "path": "src/main/java/engine/board/MoveGenerator.java",
-      "accessCount": 1,
-      "lastAccessed": 1782974346800,
-      "type": "directory"
-    },
-    {
-      "path": "src/test",
-      "accessCount": 1,
-      "lastAccessed": 1782974421278,
+      "lastAccessed": 1783088060334,
       "type": "directory"
     }
   ],

@@ -111,6 +111,17 @@ public final class Search {
     // don't fully exclude at high depth (where a wrong cutoff is most expensive).
     private static final int NMP_VERIFY_DEPTH = 10;
 
+    // Singular extensions: when a TT move from a trustworthy entry (depth within
+    // SINGULAR_TT_DEPTH_MARGIN of the current one, lower-bound or exact) is re-verified by a
+    // reduced-depth search of every OTHER move against a margin below the TT score and nothing
+    // comes close, the TT move is the position's only real try -- extend it a ply so forced
+    // sequences aren't cut off at the horizon. The same exclusion search doubles as multicut:
+    // if even without the TT move the reduced search beats beta, two independent moves fail
+    // high and the whole node can be cut immediately.
+    private static final int SINGULAR_MIN_DEPTH = 8;
+    private static final int SINGULAR_TT_DEPTH_MARGIN = 3; // ttDepth >= depth - this
+    private static final int SINGULAR_MARGIN_PER_DEPTH = 2; // singularBeta = ttScore - 2*depth
+
     // Futility pruning: near the leaves, a quiet move that can't plausibly close the gap to
     // alpha (staticEval + a depth-scaled margin still falls short) is skipped without being
     // searched -- the same reasoning as quiescence's delta pruning, one ply higher up. The
@@ -119,6 +130,18 @@ public final class Search {
     private static final int FUTILITY_MAX_DEPTH = 6;
     private static final int FUTILITY_BASE_MARGIN = 100;
     private static final int FUTILITY_MARGIN_PER_DEPTH = 80;
+
+    // History pruning: at shallow non-PV nodes, a quiet move whose combined ordering score
+    // (butterfly history + both continuation-history tables, see scoreMove) is deeply
+    // negative has repeatedly failed to refute anything in this exact context -- skip it
+    // without a search. The margin scales with depth so only ever-worse offenders are pruned
+    // as more search would otherwise be spent on them. The per-depth margin is expressed as
+    // a fraction of HISTORY_MAX because the combined score spans +-3*HISTORY_MAX: an early
+    // version used a flat -2048 (borrowed from engines whose history tables span ~+-16k),
+    // which on this scale pruned any quiet with even a mild recent malus and measurably
+    // lost self-play games (0/2 vs baseline; 50% with the pruning disabled).
+    private static final int HISTORY_PRUNE_MAX_DEPTH = 4;
+    private static final int HISTORY_PRUNE_MARGIN_PER_DEPTH = -12_500; // = -(HISTORY_MAX / 8)
 
     // Quiescence delta pruning: a capture that can't plausibly close the gap to alpha even
     // in the best case (standPat + captured piece's value + this margin) is skipped without
@@ -146,6 +169,15 @@ public final class Search {
     private static final int SOFT_BOUND_STABLE_ITERATIONS = 14;
     private static final int SOFT_BOUND_STABLE_ITERATIONS_DECISIVE = 2; // relaxed threshold once clearly winning
     private static final int SOFT_BOUND_DECISIVE_SCORE_CP = 200; // +2.00 pawns
+    // Mate-hunt band: a crushing but not-yet-mate score (>= this) means a forced mate is very
+    // likely just past the horizon, so the decisive-score acceleration above (which would bank
+    // the clock after only 2 stable iterations) is suppressed and the full soft budget is spent
+    // hunting for the actual mate. Set well above SOFT_BOUND_DECISIVE_SCORE_CP so ordinary
+    // winning positions still bank time; only genuinely won ones trigger the hunt. Observed
+    // motivation: a game where the eval ground up to +21 across several moves (exiting ~depth
+    // 15 each time) before a forced mate was ever reported, because the +2.00 acceleration kept
+    // banking time instead of searching deep enough to see the mate.
+    private static final int MATE_HUNT_SCORE_CP = 800; // +8.00 pawns
 
     // Volatility gate: the soft-bound early exit banks time when the root move has been stable,
     // but stability alone is blind to *sharp* positions -- a forcing pawn breakthrough (e.g.
@@ -235,6 +267,36 @@ public final class Search {
     // Countermove table: counterMoves[prevFrom][prevTo] = the quiet move that most recently
     // produced a beta cutoff as the reply to that previous move. Cleared only in newGame().
     private final int[][] counterMoves = new int[64][64];
+    // Continuation history: how well a quiet move (keyed by its piece-and-destination,
+    // pieceIndex*64+to) has refuted positions reached by a specific PREVIOUS piece-and-
+    // destination -- contHist1 keys on the move one ply back (countermove history), contHist2
+    // on the move two plies back (follow-up history: "after my Nf3 plan, ...Re8 works").
+    // Where the butterfly `history` table sees only from/to squares averaged over every
+    // context, these tables make quiet-move ordering context-sensitive, which is the largest
+    // single ordering signal a classical engine adds after killers/history. Same gravity
+    // update/decay as `history` (see gravity()), same lifetime (cleared only in newGame()).
+    // ~2.4MB per table per Search instance -- allocated once here, never inside the search.
+    private final int[][] contHist1 = new int[12 * 64][12 * 64];
+    private final int[][] contHist2 = new int[12 * 64][12 * 64];
+    // Per-ply piece-and-destination (pieceIndex*64+to) of the move made at that ply, the
+    // continuation-history key for descendants; -1 after a null move (no continuation).
+    private final int[] pieceToStack = new int[MAX_PLY + 2];
+    // Correction history: the evaluator is systematically wrong in specific pawn structures
+    // (observed live: a near-flat eval for ten moves of an advancing pawn storm that was in
+    // fact losing), and every eval-trusting pruning decision -- RFP, futility, the improving
+    // signal, the NMP eval gate -- inherits that bias. This table accumulates, per side to
+    // move and pawn-structure hash, a moving average of (search result - static eval) from
+    // completed non-mate nodes whose bound actually constrains the true score, and future
+    // static evals are nudged by it BEFORE the pruning stack consumes them. Fixed-point
+    // (CORR_GRAIN per centipawn), clamped to +-32cp of correction; per-instance (one per
+    // search thread, isolation like contHist), cleared only in newGame(). Zero allocation:
+    // sized once here, indexed by a 2-multiply mix of the pawn bitboards.
+    private static final int CORR_SIZE = 16384;      // power-of-two entries per side
+    private static final int CORR_GRAIN = 256;       // fixed-point units per centipawn
+    private static final int CORR_LIMIT = 32 * CORR_GRAIN; // max correction: +-32cp
+    private static final int CORR_WEIGHT_MAX = 16;   // deeper results move the average harder
+    private static final int CORR_WEIGHT_SCALE = 64;
+    private final int[][] corrHist = new int[2][CORR_SIZE];
     // Per-ply static-eval stack: records each node's static eval (or a sentinel when in
     // check), so a node can cheaply ask whether the side to move is "improving" relative to
     // the same side's eval two plies earlier -- consumed by depth-scaled pruning heuristics.
@@ -264,6 +326,22 @@ public final class Search {
     // and rejected before it can receive a matching history malus -- see the move loop in
     // negamax(). Ply-indexed like the pools above for the same reentrancy-safety reason.
     private final int[][] quietsTriedPool = new int[MAX_PLY + 2][256];
+    // Captures actually searched (past SEE pruning) at the current node, mirroring
+    // quietsTriedPool, so a capture beta cutoff can malus the captures tried before it.
+    private final int[][] capturesTriedPool = new int[MAX_PLY + 2][256];
+    // Capture history: [movingPiece12][toSquare][capturedType] gravity table refining the
+    // ordering AMONG captures (SEE still decides the winning/losing split and the coarse
+    // band; this breaks ties, which SEE produces constantly). Same gravity update/decay and
+    // lifetime as the quiet histories; per-instance, ~18KB, allocated once. Contribution is
+    // scaled down (CAPHIST_ORDER_DIV) so it stays SUBORDINATE to the SEE value inside the
+    // band: SEE differences within the winning-capture band are on the order of one piece
+    // value (~100-900 centipawns), so the history contribution must stay well under ~100 or
+    // it stops being a tie-break and starts overriding material order outright. An earlier
+    // divisor of 8 gave +-12,500 -- history could sort "capture the queen" below "capture a
+    // pawn" on a modest malus, corrupting capture ordering wholesale (the same scale-mismatch
+    // class of bug as the -2048 history-pruning margin incident, from the other direction).
+    private final int[][][] capHist = new int[12][64][6];
+    private static final int CAPHIST_ORDER_DIV = 2048; // max ordering effect +-HISTORY_MAX/2048 ~= +-48
     {
         for (int i = 0; i < moveListPool.length; i++) moveListPool[i] = new MoveList();
     }
@@ -319,6 +397,15 @@ public final class Search {
     // Public results / toggles
     public int bestMove;
     public int bestScore;
+    // Ponder-move hint: the 2nd PV move captured from the LAST COMPLETED iteration (pvTable is
+    // reset on entry to each iteration and left empty if that iteration is aborted by time, so
+    // it can't be read reliably after think() returns -- it's captured in the loop instead).
+    private int bestPonderMove;
+
+    /** The move we expect the opponent to reply with, for the UCI "bestmove &lt;best&gt;
+     *  ponder &lt;this&gt;" hint. 0 if no reliable continuation was found. */
+    public int ponderMove() { return bestPonderMove; }
+
     public boolean printInfo = true;
     public boolean useTT = true;
     public boolean useQuiescence = true;
@@ -337,8 +424,38 @@ public final class Search {
     public boolean useSeePruning = true;   // skip provably-losing captures at shallow depth
     public boolean useIir = true;          // internal iterative reductions (no TT move -> depth-1)
     public boolean useCounterMove = true;  // countermove ordering heuristic
+    public boolean useContHist = true;     // 1-/2-ply continuation-history quiet ordering
+    // Default OFF (data-driven): correctly implemented and equivalence-tested, but the
+    // unbiased referee gate measured the batch at 47.8% over 200 games at 100ms/move even
+    // after the propagation/scale bug fixes -- no evidence of gain at fast TC. Candidates to
+    // re-enable if a longer-TC retest or a post-Texel-tuning run shows a positive score.
+    public boolean useCaptureHistory = false; // capture-history ordering refinement
+    public boolean useCutnodeLmr = false;   // reduce one extra ply at expected cut-nodes
+    public boolean useSingular = true;     // singular extensions + multicut (needs the TT)
+    public boolean useHistoryPruning = true; // skip quiets with deeply negative history at shallow depth
     public boolean useQsTt = true;         // quiescence transposition-table probe/store
     public boolean useVolatilityGate = true; // suppress the soft early exit in sharp positions
+    public boolean useMateHunt = true;     // keep searching (don't bank time) when winning big but no mate yet
+    public boolean useShortestMate = true; // don't commit a winning mate until deep enough to play the FASTEST one
+
+    // Pondering: while true, the search ignores its time budget entirely (it was launched on
+    // the opponent's clock via UCI "go ponder"), so no time-based or found-mate exit fires --
+    // only an external stop ends it. ponderHit() flips it off AND rebases the clock to now, so
+    // the normal soft/hard/mate-hunt logic then counts the move budget from the moment the
+    // opponent actually played the predicted move. Volatile: set on the UCI input thread,
+    // read on the search thread.
+    private volatile boolean pondering;
+
+    /** UCI "ponderhit": the pondered move was played. Rebase the clock to now and let the
+     *  normal time management take over the still-running search. */
+    public void ponderHit() {
+        startNanos = System.nanoTime();
+        pondering = false;
+    }
+
+    /** Arms ponder mode for the next {@link #think}; cleared by {@link #ponderHit} or a stop. */
+    public void setPondering(boolean p) { pondering = p; }
+    public boolean useCorrectionHistory = true; // pawn-structure-keyed static-eval correction
 
     // Obvious-move pruning: skip search entirely on a forced single reply, and cut
     // iterative deepening short once a shallow iteration shows a lopsided root gap.
@@ -418,6 +535,7 @@ public final class Search {
         }
         int committedMove = 0;
         int committedScore = 0;
+        int committedPonderMove = 0;
 
         // Game ply (half-moves since the game/FEN start, independent of this search's own
         // recursion ply) drives the evaluation-based time lock below -- fullmoveNumber/
@@ -451,7 +569,7 @@ public final class Search {
                 while (true) {
                     rootBestScore = -INF;
                     rootSecondBestScore = -INF;
-                    score = negamax(pos, d, alpha, beta, 0, 0);
+                    score = negamax(pos, d, alpha, beta, 0, 0, 0, false);
                     if (stopped()) break;
                     if (score <= alpha) {
                         // Fail-low: the true score is at or below the window floor, so the
@@ -488,7 +606,7 @@ public final class Search {
             } else {
                 rootBestScore = -INF;
                 rootSecondBestScore = -INF;
-                score = negamax(pos, d, -INF, INF, 0, 0);
+                score = negamax(pos, d, -INF, INF, 0, 0, 0, false);
             }
             if (stopped() && d > 1) {
                 // Abandon the partial iteration, keep last completed result. If checkTime()
@@ -507,6 +625,10 @@ public final class Search {
             }
             committedMove = rootBestMove;
             committedScore = score;
+            // Capture the ponder move from THIS just-completed iteration's PV (pvTable[0] is
+            // valid here; it may be wiped by a later aborted iteration). Keep the last good
+            // one if this iteration's PV is a bare single move.
+            if (pvLength[0] >= 2) committedPonderMove = pvTable[0][1];
             previousScore = score;
             if (printInfo) printInfo(d, score);
 
@@ -556,6 +678,37 @@ public final class Search {
                     && gamePly < EVAL_LOCK_MAX_GAME_PLY
                     && Math.abs(committedScore) <= EVAL_LOCK_MAX_ABS_SCORE_CP;
 
+            // Getting mated: a forced mate AGAINST the engine. Every soft/early time exit is
+            // disabled in this state -- the previous search's TT entries make shallow
+            // iterations re-derive the mate score after a handful of nodes (observed: 8-16
+            // nodes at depth 2 on consecutive moves), and any exit that trusts such an
+            // iteration commits a move with zero resistance search. Deeper iterations are the
+            // only thing that can find the longest defense or a hole in the "forced" mate, so
+            // the full soft budget is always spent here. A mate FOR the engine is the
+            // opposite case and keeps its stop-as-soon-as-found handling (see the winning-mate
+            // break at the bottom of this loop).
+            boolean gettingMated = committedScore <= -MATE_IN_MAX;
+
+            // Hunting mate: winning decisively (>= MATE_HUNT_SCORE_CP) but no forced mate found
+            // yet. Suppress the stability early exit so the full soft budget is spent looking
+            // for the actual mate instead of banking the clock after 2 stable iterations. Still
+            // bounded by softLimitMs/hardLimitMs below, and superseded the instant a mate is
+            // found (score >= MATE_IN_MAX breaks the loop). The symmetric counterpart to
+            // gettingMated: one side searches full time for the longest defense, the other for
+            // the fastest kill. Excluded once the score IS a mate -- that path banks time by
+            // design (the winning-mate break).
+            boolean huntingMate = useTime && useMateHunt
+                    && committedScore >= MATE_HUNT_SCORE_CP && committedScore < MATE_IN_MAX;
+
+            // Winning mate found but not yet resolved to the fastest one: keep deepening (don't
+            // let the stability exit bank time on a possibly-slower mating move) until depth
+            // reaches the mate distance, at which point the winning-mate break below fires with
+            // the shortest mate. The counterpart to the break's own floor; without it the
+            // decisive-score stability acceleration (2 iterations) could commit an unresolved
+            // deep mate at SOFT_BOUND_MIN_DEPTH before the floor is ever reached.
+            boolean winningMateUnresolved = useTime && useShortestMate
+                    && committedScore >= MATE_IN_MAX && d < MATE - committedScore;
+
             // Soft-bound (optimum time) stability early exit: only considered once the search
             // is deep enough (>= SOFT_BOUND_MIN_DEPTH) for the root move to be trustworthy, and
             // never while the evaluation-based time lock is active -- disabling this exit
@@ -564,15 +717,17 @@ public final class Search {
             // (b) the root move has stopped changing for several iterations in a row -- a
             // depth confirming the same move again is unlikely to change the final decision,
             // so the remaining clock time is better saved than spent re-confirming it.
-            if (evalLockActive || volatilePos) {
+            if (evalLockActive || volatilePos || gettingMated || huntingMate || winningMateUnresolved) {
                 // Explicitly clear rather than merely skip-setting: softStopArmed is a field
                 // that persists across iterations, so a prior iteration (before the lock/
                 // volatility engaged, or before committedScore dropped into the dead-equal
                 // band) could otherwise leave a stale `true` behind that checkTime() would
                 // still honor mid-iteration even though this iteration's block never re-armed
-                // it. A volatile position must never take the optimum-time soft exit.
+                // it. A volatile position must never take the optimum-time soft exit, and
+                // neither must a search that is being mated (gettingMated) or closing in on a
+                // mate it hasn't yet found (huntingMate).
                 softStopArmed = false;
-            } else if (useTime && d >= SOFT_BOUND_MIN_DEPTH) {
+            } else if (!pondering && useTime && d >= SOFT_BOUND_MIN_DEPTH) {
                 // Acceleration rule: a decisively winning score (> +2.00 pawns) needs only 2
                 // stable iterations instead of 3 -- the position is unlikely to be spoiled by
                 // one fewer confirmation, so we can bank the extra time even faster.
@@ -617,7 +772,12 @@ public final class Search {
             // collapse. Only ever tightens the budget (fixed-depth/analysis, useTime == false,
             // is untouched and still searches to the requested depth).
             long effectiveSoftLimit = softLimitMs;
-            if (useTime && useObviousMovePruning && hasResolvedRootGap(d)) {
+            // Never while being mated OR hunting a mate: a lopsided root gap there is expected
+            // (one defense delays the mate far longer than the rest, or one move is the kill),
+            // exactly the position that needs the full budget, not half of it -- halving here
+            // would undo the huntingMate/gettingMated suppression above.
+            if (useTime && useObviousMovePruning && !gettingMated && !huntingMate
+                    && hasResolvedRootGap(d)) {
                 effectiveSoftLimit = softLimitMs / 2;
             }
 
@@ -633,8 +793,23 @@ public final class Search {
                         (long) (softLimitMs * LOST_TIME_FRACTION));
             }
 
-            if (useTime && elapsedMs() >= effectiveSoftLimit && evalLockTimeSatisfied) break;
-            if (Math.abs(score) >= MATE_IN_MAX) break; // forced mate found: never worth locking against
+            if (!pondering && useTime && elapsedMs() >= effectiveSoftLimit && evalLockTimeSatisfied) break;
+            // Winning-mate short-circuit -- deliberately asymmetric. A mate FOR the engine
+            // banks the clock, but ONLY once the search is deep enough to have resolved the
+            // SHORTEST mate. Breaking the instant any iteration first reports a mate (typically
+            // a depth-1 TT hit) commits whatever mating move the shallow read happened to pick,
+            // which need not be the fastest -- observed live as the reported mate distance
+            // LENGTHENING across consecutive moves (#3 -> #4 -> #5) during a depth-1 playout.
+            // For a winning mate, score == MATE - matePlies, so matePlies == MATE - score;
+            // searching to d >= matePlies guarantees the whole mate is within the horizon and
+            // the fastest one is chosen. This SELF-CORRECTS: as depth grows and a shorter mate
+            // is found, score rises and the required depth shrinks, so it breaks the moment the
+            // true shortest mate is confirmed. Mate trees are tiny, so this costs negligible
+            // time. A mate AGAINST the engine (score <= -MATE_IN_MAX) still never stops
+            // deepening (see gettingMated). useShortestMate=false restores the old plain break.
+            // While pondering, never stop early -- not even on a found mate: the pondered move
+            // may not be played, so we must keep searching until stop/ponderhit.
+            if (!pondering && score >= MATE_IN_MAX && (!useShortestMate || d >= MATE - score)) break;
         }
 
         if (committedMove == 0) {
@@ -645,6 +820,7 @@ public final class Search {
 
         bestMove = committedMove;
         bestScore = committedScore;
+        bestPonderMove = committedPonderMove;
         return committedMove;
     }
 
@@ -652,6 +828,7 @@ public final class Search {
     private int bypassForcedMove(Position pos, int onlyMove) {
         bestMove = onlyMove;
         bestScore = evaluator.evaluate(pos);
+        bestPonderMove = 0;
         if (printInfo) {
             System.out.println("bestmove " + Move.toUci(onlyMove));
             System.out.flush();
@@ -692,7 +869,21 @@ public final class Search {
         return givesCheck;
     }
 
-    private int negamax(Position pos, int depth, int alpha, int beta, int ply, int extensions) {
+    /** {@code excludedMove}: non-zero only inside a singular-verification search, where that
+     *  one move is skipped and TT cutoffs/stores are suppressed (the table's entry describes
+     *  the position WITH the move; the exclusion search is asking about the position without
+     *  it, a different question whose answer must not overwrite the real one). */
+    private int negamax(Position pos, int depth, int alpha, int beta, int ply, int extensions,
+                        int excludedMove, boolean cutNode) {
+        // Reset this node's PV length BEFORE any early return below. pvTable/pvLength slots
+        // are reused across the whole tree, so a node that exits through the stopped/draw/
+        // max-ply shortcuts without resetting its slot leaves pvLength[ply] holding a line
+        // from an EARLIER visit to this ply in an unrelated subtree -- and a PV-node parent
+        // that then accepts this child's score (the repetition-draw 0 raising alpha is the
+        // classic case) splices those stale, now-illegal moves into the reported PV.
+        // Observed live: "info ... pv ... f4c1 b2a3" where b2a3 was impossible at the root,
+        // crashing the lichess-bot wrapper's PV parser.
+        pvLength[ply] = ply;
         if (stopped()) return 0;
         if (ply > 0 && pos.isDrawByRuleOrRepetition()) return DRAW;
         // Hard leaf: without this, a check-extension chain (each check bumping depth back up
@@ -708,11 +899,6 @@ public final class Search {
         // "not better than alpha" as cheaply as possible; LMR is only safe to trust there,
         // since a PV node's true score still needs to be pinned down exactly.
         boolean isPvNode = beta - alpha > 1;
-
-        // Start this node's PV empty; it grows only when a move raises alpha (see the move
-        // loop). Set before the depth<=0 / quiescence drop-through so a parent copying this
-        // node's PV always reads a valid (possibly empty) length.
-        pvLength[ply] = ply;
 
         boolean inCheck = pos.inCheck(pos.sideToMove());
         // Check extension: a forcing check is extended by a full ply so tactical lines don't
@@ -737,14 +923,20 @@ public final class Search {
         long key = pos.zobristKey();
         int ttMove = 0;
         int ttEval = TranspositionTable.NO_EVAL;
+        int ttFlag = TranspositionTable.FLAG_NONE;
+        int ttDepth = 0;
+        int ttScore = 0; // ply-adjusted; meaningful only when ttFlag != FLAG_NONE
         if (useTT) {
             long entry = tt.probe(key);
             int f = TranspositionTable.flagOf(entry);
             if (f != TranspositionTable.FLAG_NONE) {
                 ttMove = TranspositionTable.moveOf(entry);
                 ttEval = TranspositionTable.evalOf(entry);
-                if (ply > 0 && TranspositionTable.depthOf(entry) >= depth) {
-                    int s = scoreFromTt(TranspositionTable.scoreOf(entry), ply);
+                ttFlag = f;
+                ttDepth = TranspositionTable.depthOf(entry);
+                ttScore = scoreFromTt(TranspositionTable.scoreOf(entry), ply);
+                if (ply > 0 && excludedMove == 0 && ttDepth >= depth) {
+                    int s = ttScore;
                     if (f == TranspositionTable.FLAG_EXACT) return s;
                     // Fail-SOFT on TT-sourced bounds: return the stored score itself, not the
                     // window edge. A lower bound proved the true value is >= s (>= beta here),
@@ -773,21 +965,31 @@ public final class Search {
         // when this position was seen before, else evaluate once. Meaningless while in check,
         // so left as a sentinel there. Node counts are unchanged by this (nodes tick on entry,
         // not per eval); it is purely an nps win plus the source of the `improving` signal.
+        int rawEval; // uncorrected: what the TT stores, so corrections never compound
         int staticEval;
         if (inCheck) {
+            rawEval = TranspositionTable.NO_EVAL;
             staticEval = TranspositionTable.NO_EVAL;
             evalStack[ply] = -INF; // sentinel: an in-check node never counts as "improving"
         } else {
-            staticEval = ttEval != TranspositionTable.NO_EVAL ? ttEval : evaluator.evaluate(pos);
+            rawEval = ttEval != TranspositionTable.NO_EVAL ? ttEval : evaluator.evaluate(pos);
+            staticEval = useCorrectionHistory ? correctedEval(pos, rawEval) : rawEval;
             evalStack[ply] = staticEval;
         }
+        // "Improving": the side to move's static eval rose versus two plies ago -- when it
+        // did, we are likely on an upswing and can afford to prune slightly harder (RFP
+        // margin below, LMP budget and LMR depth in the move loop).
+        boolean improving = !inCheck && ply >= 2 && evalStack[ply] > evalStack[ply - 2];
 
         // Reverse futility pruning: a node-level shortcut tried before move generation, since
         // it can skip generating/scoring moves entirely on a cutoff. Excluded near mate scores
         // (an eval-based margin can't be trusted to reason about forced mates) and at the root
         // (ply 0 must always return a real move).
-        if (useRfp && !inCheck && ply > 0 && depth <= RFP_MAX_DEPTH && beta < MATE_IN_MAX) {
-            if (staticEval - RFP_MARGIN_PER_DEPTH * depth >= beta) {
+        if (useRfp && !inCheck && ply > 0 && excludedMove == 0
+                && depth <= RFP_MAX_DEPTH && beta < MATE_IN_MAX) {
+            // An improving node effectively prunes one depth-step harder: the eval trend is
+            // already in our favor, so the margin doesn't need as much slack against it.
+            if (staticEval - RFP_MARGIN_PER_DEPTH * (depth - (improving ? 1 : 0)) >= beta) {
                 return staticEval;
             }
         }
@@ -800,7 +1002,8 @@ public final class Search {
         // already meeting beta: if the position doesn't even look good enough on its face,
         // a reduced-depth verification search is unlikely to confirm a cutoff, so the eval
         // call is spent up front to skip the (much pricier) reduced search entirely.
-        if (useNullMove && !inCheck && ply > 0 && depth >= NULL_MOVE_MIN_DEPTH
+        if (useNullMove && !inCheck && ply > 0 && excludedMove == 0
+                && depth >= NULL_MOVE_MIN_DEPTH
                 && beta < MATE_IN_MAX && hasNonPawnMaterial(pos, pos.sideToMove())
                 && staticEval >= beta
                 && moveStack[ply - 1] != 0) { // never two null moves in a row
@@ -809,7 +1012,8 @@ public final class Search {
             int r = NULL_MOVE_REDUCTION + depth / 6;
             pos.makeNullMove();
             moveStack[ply] = 0;
-            int nullScore = -negamax(pos, depth - 1 - r, -beta, -beta + 1, ply + 1, extensions);
+            pieceToStack[ply] = -1; // a null move is nobody's continuation
+            int nullScore = -negamax(pos, depth - 1 - r, -beta, -beta + 1, ply + 1, extensions, 0, !cutNode);
             pos.unmakeNullMove();
             if (stopped()) return 0;
             if (nullScore >= beta) {
@@ -821,12 +1025,42 @@ public final class Search {
                 // against zugzwang, where the "free" null move hides that every real move loses.
                 boolean savedNull = useNullMove;
                 useNullMove = false;
-                int verify = negamax(pos, depth - 1 - r, beta - 1, beta, ply, extensions);
+                int verify = negamax(pos, depth - 1 - r, beta - 1, beta, ply, extensions, 0, cutNode);
                 useNullMove = savedNull;
                 if (stopped()) return 0;
                 if (verify >= beta) {
                     return beta;
                 }
+            }
+        }
+
+        // Singular-extension verification (and multicut). Same-ply recursion is safe for the
+        // per-ply pools for the same reason the null-move verification search above is: it
+        // runs to completion BEFORE this node touches moveListPool[ply]/scorePool[ply].
+        // A TT move whose entry is deep enough (within SINGULAR_TT_DEPTH_MARGIN) and at least
+        // a lower bound is re-tested by searching every OTHER move at half depth against
+        // (ttScore - margin): if nothing comes close, the TT move is the only real try and
+        // gets a one-ply extension (under the same budget as check extensions, so forcing
+        // lines can't explode depth unboundedly). If the excluded search instead beats beta,
+        // two separate moves fail high here and the node is cut outright (multicut).
+        int singularExtension = 0;
+        if (useSingular && useTT && excludedMove == 0 && ply > 0
+                && depth >= SINGULAR_MIN_DEPTH
+                && ttMove != 0
+                && (ttFlag == TranspositionTable.FLAG_LOWER || ttFlag == TranspositionTable.FLAG_EXACT)
+                && ttDepth >= depth - SINGULAR_TT_DEPTH_MARGIN
+                && Math.abs(ttScore) < MATE_IN_MAX
+                && extensions < currentDepth / 2) {
+            int singularBeta = ttScore - SINGULAR_MARGIN_PER_DEPTH * depth;
+            int value = negamax(pos, (depth - 1) / 2, singularBeta - 1, singularBeta,
+                    ply, extensions, ttMove, cutNode);
+            if (stopped()) return 0;
+            if (value < singularBeta) {
+                singularExtension = 1;
+            } else if (value >= beta) {
+                // Multicut: the fail-soft value is a valid lower bound for this node even
+                // with the TT move removed, so with it back the bound can only be stronger.
+                return value;
             }
         }
 
@@ -842,11 +1076,12 @@ public final class Search {
         int prevMove = ply > 0 ? moveStack[ply - 1] : 0;
         int counterMove = (useCounterMove && prevMove != 0)
                 ? counterMoves[Move.from(prevMove)][Move.to(prevMove)] : 0;
+        // Continuation-history keys of the ancestor moves one and two plies back (-1 when
+        // unavailable: root shallow plies, a null move, or the toggle being off).
+        int pt1 = (useContHist && ply >= 1) ? pieceToStack[ply - 1] : -1;
+        int pt2 = (useContHist && ply >= 2) ? pieceToStack[ply - 2] : -1;
         int[] scores = scoreArray(ply, moves.size);
-        scoreMoves(pos, moves, ttMove, ply, us, scores, counterMove);
-        // "Improving": the side to move's static eval rose versus two plies ago -- when it
-        // did, we are likely on an upswing and can afford to prune quiets slightly harder.
-        boolean improving = !inCheck && ply >= 2 && evalStack[ply] > evalStack[ply - 2];
+        scoreMoves(pos, moves, ttMove, ply, us, scores, counterMove, pt1, pt2);
 
         // Futility pruning gate: computed once per node (not per move) so the move loop below
         // only pays for a static eval call when a low enough depth makes it useful. Excluded
@@ -870,10 +1105,13 @@ public final class Search {
         boolean rootMoveCommitted = false;
         int[] quietsTried = quietsTriedPool[ply];
         int quietsTriedCount = 0;
+        int[] capturesTried = capturesTriedPool[ply];
+        int capturesTriedCount = 0;
 
         for (int i = 0; i < moves.size; i++) {
             selectNext(moves, scores, i);
             int move = moves.moves[i];
+            if (move == excludedMove) continue; // singular verification asks "and without this?"
             boolean isCapture = Move.isCapture(move);
             boolean isPromotion = Move.isPromotion(move);
             boolean isQuiet = !isCapture && !isPromotion;
@@ -898,8 +1136,21 @@ public final class Search {
                 continue;
             }
 
+            // History pruning (also before making the move): scores[i] for a plain quiet is
+            // its combined butterfly + continuation history (killers/countermove sit in
+            // positive bands far above the threshold, so they are never caught). A quiet this
+            // context has repeatedly punished isn't worth a search at shallow depth.
+            if (useHistoryPruning && !isPvNode && !inCheck && isQuiet && i > 0
+                    && depth <= HISTORY_PRUNE_MAX_DEPTH && bestScore > -MATE_IN_MAX
+                    && scores[i] < HISTORY_PRUNE_MARGIN_PER_DEPTH * depth) {
+                continue;
+            }
+
+            // Continuation-history key of this move (mover is still on `from` pre-make).
+            int movedPieceTo = pos.pieceAt(Move.from(move)) * 64 + Move.to(move);
             pos.makeMove(move);
             moveStack[ply] = move; // the move that leads to the child node at ply+1
+            pieceToStack[ply] = movedPieceTo;
 
             // `givesCheck` is computed once and shared by both futility pruning and LMR below,
             // but only when at least one of them could actually use it (isQuiet, plus either
@@ -944,6 +1195,7 @@ public final class Search {
             // later move in this loop causes a cutoff, every quiet tried and rejected before
             // it can be identified for a history malus below.
             if (isQuiet) quietsTried[quietsTriedCount++] = move;
+            else if (isCapture) capturesTried[capturesTriedCount++] = move;
 
             int score;
             // Late Move Reduction qualification: only quiet moves (no capture, no promotion, no
@@ -957,7 +1209,15 @@ public final class Search {
                 // captures, then killers/history) makes the first move at every node the one
                 // most likely to be best, so it alone gets the full alpha-beta window -- its
                 // score becomes the alpha every later move in this loop only has to beat.
-                score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, extensions);
+                // A singular TT move (see the verification block above) is extended a ply
+                // here; the TT move always sorts first, so i == 0 is the only site needed.
+                int ext = (singularExtension != 0 && move == ttMove) ? 1 : 0;
+                // Child node-type label: the first child of a PV node is the next PV node
+                // (false); at a NON-PV node this "full-window" call is a zero-width window
+                // anyway, and the standard alternation applies -- a cut-node's first child is
+                // an all-node and vice versa (!cutNode).
+                score = -negamax(pos, depth - 1 + ext, -beta, -alpha, ply + 1, extensions + ext, 0,
+                        isPvNode ? false : !cutNode);
             } else {
                 // Every later move is assumed to be worse: probe it first with a minimal
                 // (null/zero) window, (-alpha-1, -alpha). Proving "not better than alpha"
@@ -972,8 +1232,14 @@ public final class Search {
                     // un-reduced case, depth-1 must still be free to reach 0 and fall into
                     // quiescence, but a reduced search must never collapse the node to a leaf.
                     reduction = LMR_TABLE[Math.min(depth, 63)][Math.min(i, 63)];
+                    // Reduce a step harder when the node isn't improving (eval trending down
+                    // makes late quiets even less likely to matter)...
+                    if (!improving) reduction++;
+                    // ...and a step softer for moves ordering already trusts: killers, or a
+                    // strong combined history/continuation-history score (scores[i] is that
+                    // combined signal for plain quiets; killer band values also clear it).
                     if (move == killers[ply][0] || move == killers[ply][1]
-                            || history[us][Move.from(move)][Move.to(move)] >= HISTORY_MAX / 2) {
+                            || scores[i] >= HISTORY_MAX / 2) {
                         reduction--;
                     }
                     // Same carve-out LMP already applies: an advanced pawn push carries slow,
@@ -982,18 +1248,28 @@ public final class Search {
                     // raw log table would at a high index) pushes exactly those strategic
                     // resources past the horizon before the search can appreciate them.
                     if (isAdvancedPawnPush && reduction > 1) reduction = 1;
+                    // Cut-node reduction: a node expected to fail high spends its late moves
+                    // only to confirm the cutoff, so they can afford one more ply of reduction.
+                    if (useCutnodeLmr && cutNode) reduction++;
                     if (reduction < 0) reduction = 0;
                     if (reduction > depth - 2) reduction = depth - 2;
                     searchDepth = depth - 1 - reduction;
                 }
-                score = -negamax(pos, searchDepth, -alpha - 1, -alpha, ply + 1, extensions);
+                // Child expectation flips at each null-window level: a cut-node's children
+                // are all-nodes and vice versa (at a PV node, cutNode == false, so later
+                // scout children are expected cut-nodes -- the standard PVS pattern). An
+                // earlier version passed `true` unconditionally here, which labelled nearly
+                // every non-PV node in the tree an expected cut-node and made the cutnode-LMR
+                // extra reduction fire everywhere: measured +23% fixed-depth nodes from
+                // re-search cascades and a self-play regression.
+                score = -negamax(pos, searchDepth, -alpha - 1, -alpha, ply + 1, extensions, 0, !cutNode);
                 if (score > alpha && reduction > 0) {
                     // LMR re-search guardrail: a reduced-depth probe is not trustworthy enough
                     // to accept a fail-high -- the shallower search may simply have missed a
                     // refutation the reduction skipped over. Re-verify at the original,
                     // unreduced depth, still under the null window, before deciding whether
                     // this move earns the full PVS re-search below.
-                    score = -negamax(pos, depth - 1, -alpha - 1, -alpha, ply + 1, extensions);
+                    score = -negamax(pos, depth - 1, -alpha - 1, -alpha, ply + 1, extensions, 0, !cutNode);
                 }
                 if (score > alpha && score < beta) {
                     // PVS re-search trigger: the null window failed high without reaching
@@ -1004,7 +1280,7 @@ public final class Search {
                     // could be higher still); the exact value can only be pinned down by
                     // re-opening the *full* original window, (-beta, -alpha), not a window
                     // narrowed to the unverified probe score.
-                    score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, extensions);
+                    score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1, extensions, 0, false);
                 }
             }
             pos.unmakeMove(move);
@@ -1057,6 +1333,7 @@ public final class Search {
                             }
                             int bonus = Math.min(depth * depth, HISTORY_MAX);
                             updateHistory(us, move, bonus);
+                            updateContHist(pos, ply, move, bonus);
                             // Malus: every other quiet tried (and searched) at this node
                             // before the one that just caused the cutoff evidently didn't
                             // refute the position as well -- nudge it down by the same
@@ -1067,6 +1344,17 @@ public final class Search {
                             // between similar positions once the TT move stops cutting off.
                             for (int qi = 0; qi < quietsTriedCount - 1; qi++) {
                                 updateHistory(us, quietsTried[qi], -bonus);
+                                updateContHist(pos, ply, quietsTried[qi], -bonus);
+                            }
+                        } else if (useCaptureHistory && isCapture) {
+                            // A capture caused the cutoff: reward it, and malus every capture
+                            // tried and rejected before it (the last recorded capture is this
+                            // one, so skip it). Board is already unmade, so pieceAt() reads the
+                            // parent position -- captured piece is back on `to`.
+                            int bonus = Math.min(depth * depth, HISTORY_MAX);
+                            updateCaptureHistory(pos, move, bonus);
+                            for (int ci = 0; ci < capturesTriedCount - 1; ci++) {
+                                updateCaptureHistory(pos, capturesTried[ci], -bonus);
                             }
                         }
                         break;
@@ -1090,11 +1378,28 @@ public final class Search {
             rootBestMove = localBest;
         }
 
-        if (useTT) {
+        // Never store an exclusion-search result: it scored the position WITHOUT one of its
+        // moves, which is not this zobrist key's real value (see the negamax javadoc).
+        // Correction-history update: fold in this node's (result - static eval) difference,
+        // but only when the result can legitimately disagree with the eval -- never in check
+        // (no eval exists), never on mate scores (not an eval-scale quantity), never from an
+        // exclusion search, and only when the bound direction actually constrains the true
+        // score (a fail-low BELOW the eval or fail-high ABOVE it says nothing about where the
+        // exact value sits relative to the eval).
+        if (useCorrectionHistory && !inCheck && excludedMove == 0
+                && Math.abs(bestScore) < MATE_IN_MAX) {
+            boolean failHigh = bestScore >= beta;
+            boolean failLow = bestScore <= origAlpha;
+            if ((!failHigh || bestScore > staticEval) && (!failLow || bestScore < staticEval)) {
+                updateCorrection(pos, depth, bestScore - staticEval);
+            }
+        }
+
+        if (useTT && excludedMove == 0) {
             int flag = bestScore <= origAlpha ? TranspositionTable.FLAG_UPPER
                      : bestScore >= beta ? TranspositionTable.FLAG_LOWER
                      : TranspositionTable.FLAG_EXACT;
-            int storedEval = inCheck ? TranspositionTable.NO_EVAL : staticEval;
+            int storedEval = inCheck ? TranspositionTable.NO_EVAL : rawEval;
             tt.store(key, depth, scoreToTt(bestScore, ply), flag, localBest, storedEval, ttGeneration);
         }
         return bestScore;
@@ -1133,6 +1438,7 @@ public final class Search {
         int qBestMove = 0;
         int bestScore;
         int standPat = 0;
+        int rawStandPat = 0; // uncorrected twin of standPat; what the QS TT stores
         if (inCheck) {
             // Static eval of an in-check position is meaningless (it ignores the check
             // entirely), so returning it here is a prime source of tactical blindness. With
@@ -1142,13 +1448,16 @@ public final class Search {
             if (!useQsEvasions && checkBudget <= 0) return evaluator.evaluate(pos);
             bestScore = -INF;
         } else {
-            standPat = (useTT && useQsTt && ttStoredEval != TranspositionTable.NO_EVAL)
+            // rawStandPat is what the TT stores (see negamax's rawEval: corrections must
+            // never compound through the table); the corrected value drives the cutoffs.
+            rawStandPat = (useTT && useQsTt && ttStoredEval != TranspositionTable.NO_EVAL)
                     ? ttStoredEval : evaluator.evaluate(pos);
+            standPat = useCorrectionHistory ? correctedEval(pos, rawStandPat) : rawStandPat;
             bestScore = standPat;
             if (standPat >= beta) {
                 if (useTT && useQsTt) {
                     tt.store(key, 0, scoreToTt(standPat, ply), TranspositionTable.FLAG_LOWER,
-                            0, standPat, ttGeneration);
+                            0, rawStandPat, ttGeneration);
                 }
                 return standPat;
             }
@@ -1202,7 +1511,7 @@ public final class Search {
             int flag = bestScore <= origAlpha ? TranspositionTable.FLAG_UPPER
                      : bestScore >= beta ? TranspositionTable.FLAG_LOWER
                      : TranspositionTable.FLAG_EXACT;
-            int se = inCheck ? TranspositionTable.NO_EVAL : standPat;
+            int se = inCheck ? TranspositionTable.NO_EVAL : rawStandPat;
             tt.store(key, 0, scoreToTt(bestScore, ply), flag, qBestMove, se, ttGeneration);
         }
         return bestScore;
@@ -1222,13 +1531,14 @@ public final class Search {
     }
 
     private void scoreMoves(Position pos, MoveList moves, int ttMove, int ply, int us, int[] scores,
-                            int counterMove) {
+                            int counterMove, int pt1, int pt2) {
         for (int i = 0; i < moves.size; i++) {
-            scores[i] = scoreMove(pos, moves.moves[i], ttMove, ply, us, counterMove);
+            scores[i] = scoreMove(pos, moves.moves[i], ttMove, ply, us, counterMove, pt1, pt2);
         }
     }
 
-    private int scoreMove(Position pos, int move, int ttMove, int ply, int us, int counterMove) {
+    private int scoreMove(Position pos, int move, int ttMove, int ply, int us, int counterMove,
+                          int pt1, int pt2) {
         if (move == ttMove) return TT_SCORE;
         int flag = Move.flag(move);
         boolean capture = (flag & 4) != 0;
@@ -1240,6 +1550,11 @@ public final class Search {
             int seeValue = see(pos, move);
             int score = seeValue >= 0 ? CAPTURE_BASE + seeValue : BAD_CAPTURE_BASE + seeValue;
             if (promo) score += 64;
+            // Capture-history tie-break within the band (scaled to stay inside it).
+            if (useCaptureHistory) {
+                int mover = pos.pieceAt(Move.from(move));
+                score += capHist[mover][Move.to(move)][capturedType(pos, move)] / CAPHIST_ORDER_DIV;
+            }
             return score;
         }
         if (promo) {
@@ -1250,7 +1565,16 @@ public final class Search {
         // Countermove: a quiet that refuted this exact predecessor before, ranked just under
         // the killers and above generic history.
         if (move == counterMove) return COUNTERMOVE;
-        return history[us][Move.from(move)][Move.to(move)];
+        // Quiet ordering: butterfly history plus the two continuation-history tables. Max
+        // combined magnitude is 3*HISTORY_MAX = 300k, still strictly below COUNTERMOVE (700k),
+        // so the ordering bands stay layered.
+        int score = history[us][Move.from(move)][Move.to(move)];
+        if (pt1 >= 0 || pt2 >= 0) {
+            int cur = pos.pieceAt(Move.from(move)) * 64 + Move.to(move);
+            if (pt1 >= 0) score += contHist1[pt1][cur];
+            if (pt2 >= 0) score += contHist2[pt2][cur];
+        }
+        return score;
     }
 
     private void scoreMovesQ(Position pos, MoveList moves, int[] scores, int ttMove) {
@@ -1415,8 +1739,81 @@ public final class Search {
      */
     private void updateHistory(int us, int move, int bonus) {
         int from = Move.from(move), to = Move.to(move);
-        int current = history[us][from][to];
-        history[us][from][to] = current + bonus - current * Math.abs(bonus) / HISTORY_MAX;
+        history[us][from][to] = gravity(history[us][from][to], bonus);
+    }
+
+    /** The gravity update itself, shared by every history-family table (see updateHistory). */
+    private static int gravity(int current, int bonus) {
+        return current + bonus - current * Math.abs(bonus) / HISTORY_MAX;
+    }
+
+    // --- correction history (see the corrHist field notes) ---
+
+    /** Pawn-structure hash slot: same 2-multiply mix the evaluator's pawn cache uses. */
+    private int pawnCorrIndex(Position pos) {
+        long wp = pos.pieces(Piece.index(Piece.WHITE, Piece.PAWN));
+        long bp = pos.pieces(Piece.index(Piece.BLACK, Piece.PAWN));
+        long h = wp * 0x9E3779B97F4A7C15L ^ Long.rotateLeft(bp * 0xC2B2AE3D27D4EB4FL, 32);
+        h ^= h >>> 32;
+        return (int) h & (CORR_SIZE - 1);
+    }
+
+    /** The raw evaluator output nudged by the learned pawn-structure correction, kept
+     *  strictly clear of the mate band so a corrected eval can never masquerade as mate. */
+    private int correctedEval(Position pos, int rawEval) {
+        int v = rawEval + corrHist[pos.sideToMove()][pawnCorrIndex(pos)] / CORR_GRAIN;
+        if (v >= MATE_IN_MAX) v = MATE_IN_MAX - 1;
+        if (v <= -MATE_IN_MAX) v = -MATE_IN_MAX + 1;
+        return v;
+    }
+
+    /** Folds a completed node's (search result - static eval) difference into the moving
+     *  average, weighted by depth (deeper results are more trustworthy) and clamped. */
+    private void updateCorrection(Position pos, int depth, int diff) {
+        int stm = pos.sideToMove();
+        int idx = pawnCorrIndex(pos);
+        int target = diff * CORR_GRAIN;
+        if (target > CORR_LIMIT) target = CORR_LIMIT;
+        if (target < -CORR_LIMIT) target = -CORR_LIMIT;
+        int weight = Math.min(depth + 1, CORR_WEIGHT_MAX);
+        int next = (corrHist[stm][idx] * (CORR_WEIGHT_SCALE - weight) + target * weight)
+                / CORR_WEIGHT_SCALE;
+        if (next > CORR_LIMIT) next = CORR_LIMIT;
+        if (next < -CORR_LIMIT) next = -CORR_LIMIT;
+        corrHist[stm][idx] = next;
+    }
+
+    /**
+     * Applies a gravity {@code bonus} to both continuation-history tables for {@code move}
+     * at {@code ply}, keyed by the ancestor moves one and two plies back. Called at the same
+     * points as {@link #updateHistory} (cutoff bonus + tried-quiet malus); the move is
+     * already unmade here, so its mover is back on its from-square.
+     */
+    /** Captured piece TYPE for {@code move} (PAWN for en passant), for capture-history keys. */
+    private int capturedType(Position pos, int move) {
+        return Move.flag(move) == Move.EP_CAPTURE ? Piece.PAWN : Piece.type(pos.pieceAt(Move.to(move)));
+    }
+
+    /** Applies a gravity {@code bonus} to the capture-history cell of {@code move} (board must
+     *  be in the pre-move / unmade state so the mover sits on `from` and the victim on `to`). */
+    private void updateCaptureHistory(Position pos, int move, int bonus) {
+        int mover = pos.pieceAt(Move.from(move));
+        int to = Move.to(move);
+        int cap = capturedType(pos, move);
+        capHist[mover][to][cap] = gravity(capHist[mover][to][cap], bonus);
+    }
+
+    private void updateContHist(Position pos, int ply, int move, int bonus) {
+        if (!useContHist) return;
+        int cur = pos.pieceAt(Move.from(move)) * 64 + Move.to(move);
+        if (ply >= 1) {
+            int pt1 = pieceToStack[ply - 1];
+            if (pt1 >= 0) contHist1[pt1][cur] = gravity(contHist1[pt1][cur], bonus);
+        }
+        if (ply >= 2) {
+            int pt2 = pieceToStack[ply - 2];
+            if (pt2 >= 0) contHist2[pt2][cur] = gravity(contHist2[pt2][cur], bonus);
+        }
     }
 
     private void clearKillers() {
@@ -1426,7 +1823,9 @@ public final class Search {
         }
     }
 
-    private void resetHeuristics() {
+    // Package-private so LazySmpSearch can flush its persistent workers' tables on
+    // ucinewgame without re-clearing the shared TT once per worker via newGame().
+    void resetHeuristics() {
         clearKillers();
         for (int c = 0; c < 2; c++) {
             for (int f = 0; f < 64; f++) {
@@ -1435,6 +1834,15 @@ public final class Search {
         }
         for (int f = 0; f < 64; f++) {
             java.util.Arrays.fill(counterMoves[f], 0);
+        }
+        for (int i = 0; i < contHist1.length; i++) {
+            java.util.Arrays.fill(contHist1[i], 0);
+            java.util.Arrays.fill(contHist2[i], 0);
+        }
+        java.util.Arrays.fill(corrHist[0], 0);
+        java.util.Arrays.fill(corrHist[1], 0);
+        for (int p = 0; p < 12; p++) {
+            for (int s = 0; s < 64; s++) java.util.Arrays.fill(capHist[p][s], 0);
         }
     }
 
@@ -1533,7 +1941,7 @@ public final class Search {
     }
 
     private void checkTime() {
-        if (!useTime || currentDepth < 2) return;
+        if (pondering || !useTime || currentDepth < 2) return;
         long elapsed = elapsedMs();
         if (elapsed >= hardLimitMs) {
             stop = true;
@@ -1571,8 +1979,9 @@ public final class Search {
     }
 
     /** The full principal variation for the just-completed root iteration (falls back to the
-     *  committed root move if, e.g., the PV table wasn't populated). */
-    private String pvString() {
+     *  committed root move if, e.g., the PV table wasn't populated). Package-private so
+     *  PvIntegrityTest can validate every reported PV move for legality. */
+    String pvString() {
         if (pvLength[0] <= 0 || pvTable[0][0] == 0) {
             return rootBestMove != 0 ? Move.toUci(rootBestMove) : "0000";
         }

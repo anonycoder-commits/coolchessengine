@@ -67,6 +67,9 @@ class SearchPhase2Test {
         s.useLmp = false;
         s.useSeePruning = false;
         s.useIir = false;
+        s.useSingular = false;       // inert with useTT=false, disabled for explicitness
+        s.useHistoryPruning = false; // prunes based on ordering state -> not minimax-equal
+        s.useCorrectionHistory = false; // eval must stay the pure evaluator output here
         return s;
     }
 
@@ -108,6 +111,9 @@ class SearchPhase2Test {
         withTt.useSeePruning = false;
         withTt.useIir = false;
         withTt.useQsTt = false;
+        withTt.useSingular = false;   // TT-only heuristic: would legitimately diverge from noTt
+        withTt.useHistoryPruning = false;
+        withTt.useCorrectionHistory = false; // learned state differs per tree -> would diverge
         withTt.search(p1, depth);
 
         Position p2 = Position.fromFen(fen);
@@ -122,6 +128,9 @@ class SearchPhase2Test {
         noTt.useSeePruning = false;
         noTt.useIir = false;
         noTt.useQsTt = false;
+        noTt.useSingular = false;
+        noTt.useHistoryPruning = false;
+        noTt.useCorrectionHistory = false;
         noTt.search(p2, depth);
 
         int diff = Math.abs(noTt.bestScore - withTt.bestScore);

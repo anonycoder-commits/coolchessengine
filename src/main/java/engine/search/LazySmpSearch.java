@@ -22,8 +22,9 @@ import engine.board.Position;
  * history table, and move-ordering scratch buffers as private instance fields -- nothing
  * about those is static) and its own deep-copied {@link Position} (see
  * {@link Position#Position(Position)}), so two workers making/unmaking moves concurrently
- * never touch the same board. Only the {@link TranspositionTable} and the stateless
- * {@link Evaluator} are shared, and both are safe for concurrent use.
+ * never touch the same board, and its own {@link HandcraftedEvaluator} (whose pawn cache is
+ * per-instance mutable state). Only the {@link TranspositionTable} is shared, and it is safe
+ * for concurrent use.
  *
  * Only the thread-0 ("master") worker is timed and allowed to print UCI output; the
  * other ("helper") workers search with no time limit of their own -- purely to widen the
@@ -44,8 +45,13 @@ public final class LazySmpSearch {
 
     private final int threadCount;
     private final TranspositionTable tt;
-    private final Evaluator evaluator;
     private final AtomicBoolean sharedStop = new AtomicBoolean(false);
+    // Workers persist across think() calls: each owns several MB of history/continuation
+    // tables (see Search), so rebuilding them per move would both churn allocation and throw
+    // away the within-game ordering signal those tables accumulate -- persistence makes SMP
+    // match the single-threaded Search, whose tables also survive from move to move.
+    private Search[] workers;
+    private volatile boolean pendingPonder; // armed via setPondering, applied to the master
 
     public int bestMove;
     public int bestScore;
@@ -54,14 +60,12 @@ public final class LazySmpSearch {
     public LazySmpSearch(int threadCount, int hashMb) {
         this.threadCount = Math.max(1, threadCount);
         this.tt = new TranspositionTable(hashMb);
-        this.evaluator = new HandcraftedEvaluator();
     }
 
     /** Builds an SMP manager that shares an externally-owned table instead of allocating its own. */
     public LazySmpSearch(int threadCount, TranspositionTable sharedTt) {
         this.threadCount = Math.max(1, threadCount);
         this.tt = sharedTt;
-        this.evaluator = new HandcraftedEvaluator();
     }
 
     public int threadCount() { return threadCount; }
@@ -70,29 +74,48 @@ public final class LazySmpSearch {
     public void setHashSize(int mb) { tt.resize(mb); }
 
     /** Not safe to call while {@link #think} is running on another thread (see {@link TranspositionTable}). */
-    public void newGame() { tt.clear(); }
+    public void newGame() {
+        tt.clear();
+        if (workers != null) {
+            for (Search worker : workers) worker.resetHeuristics();
+        }
+    }
 
     /** Signals every worker to stop immediately (e.g. a UCI 'stop' command). */
     public void requestStop() { sharedStop.set(true); }
+
+    /** Arms ponder mode for the next {@link #think} (only the master worker is timed). */
+    public void setPondering(boolean p) { pendingPonder = p; }
+
+    /** UCI "ponderhit": rebase the master worker's clock and let normal timing take over. */
+    public void ponderHit() { if (workers != null) workers[0].ponderHit(); }
+
+    /** The master worker's ponder-move hint (2nd PV move), or 0. */
+    public int ponderMove() { return workers != null ? workers[0].ponderMove() : 0; }
 
     /** Runs the Lazy SMP search and returns the master worker's chosen move. */
     public int think(Position rootPosition, SearchLimits limits) {
         sharedStop.set(false);
 
         ExecutorService pool = Executors.newFixedThreadPool(threadCount, WORKER_THREADS);
-        Search[] workers = new Search[threadCount];
+        if (workers == null) {
+            workers = new Search[threadCount];
+            for (int id = 0; id < threadCount; id++) {
+                // One evaluator per worker: HandcraftedEvaluator owns a pawn cache and is
+                // therefore NOT shareable across threads (see its class javadoc).
+                Search worker = new Search(new HandcraftedEvaluator(), tt);
+                worker.printInfo = id == 0; // only the master prints UCI 'info'/'bestmove' text
+                worker.setSharedStop(sharedStop);
+                workers[id] = worker;
+            }
+        }
+        workers[0].setPondering(pendingPonder); // only the master is timed, so only it ponders
         List<Future<Void>> futures = new ArrayList<>(threadCount);
         try {
             for (int id = 0; id < threadCount; id++) {
-                boolean isMaster = id == 0;
-                Search worker = new Search(evaluator, tt);
-                worker.printInfo = isMaster; // only the master prints UCI 'info'/'bestmove' text
-                worker.setSharedStop(sharedStop);
-                workers[id] = worker;
-
                 Position workerPosition = new Position(rootPosition); // per-thread deep-copied board
-                SearchLimits workerLimits = isMaster ? limits : helperLimits(limits);
-                futures.add(pool.submit(searchTask(worker, workerPosition, workerLimits)));
+                SearchLimits workerLimits = id == 0 ? limits : helperLimits(limits);
+                futures.add(pool.submit(searchTask(workers[id], workerPosition, workerLimits)));
             }
 
             // Block only on the master; whatever reason it stops for (time, forced mate,

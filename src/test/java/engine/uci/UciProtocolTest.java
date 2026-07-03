@@ -129,10 +129,17 @@ class UciProtocolTest {
 
         String bestmoveLine = awaitLineStartingWith("bestmove");
         String[] parts = bestmoveLine.split("\\s+");
-        assertEquals(2, parts.length, "expected 'bestmove <move>', got: " + bestmoveLine);
+        // "bestmove <move>" optionally followed by "ponder <move>" (the reply hint for a
+        // pondering GUI). Both forms are valid UCI.
+        assertTrue(parts.length == 2 || (parts.length == 4 && parts[2].equals("ponder")),
+                "expected 'bestmove <move> [ponder <move>]', got: " + bestmoveLine);
         String uciMove = parts[1];
         assertTrue(uciMove.matches("[a-h][1-8][a-h][1-8][nbrq]?"),
                 "move should look like UCI long-algebraic notation: " + uciMove);
+        if (parts.length == 4) {
+            assertTrue(parts[3].matches("[a-h][1-8][a-h][1-8][nbrq]?"),
+                    "ponder move should look like UCI long-algebraic notation: " + parts[3]);
+        }
 
         Position pos = Position.startpos();
         pos.makeMove(findMove(pos, "e2e4"));
