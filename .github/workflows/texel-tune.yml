@@ -30,7 +30,11 @@ on:
 jobs:
   tune:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    # Standard 2-core runners are ~6x slower per epoch than the 12-thread local machine this
+    # was estimated against (891 params on the full 633k-train-position corpus); a single
+    # lambda run plausibly needs 2.5-5+ hours to converge. Generous margin over the estimate --
+    # a timeout kills the job with NO output at all, which is worse than just taking longer.
+    timeout-minutes: 480
     strategy:
       fail-fast: false
       matrix:
