@@ -272,7 +272,7 @@ public final class Evaluator {
     public static int ROOK_BEHIND_PASSER_EG = 20;
     // Default OFF (data-driven, see Search.useCaptureHistory note): chess-theoretically sound
     // and cheap after the rooks!=0 guard, but no referee-gate evidence of gain at fast TC.
-    public static boolean useRookBehindPasser = false;
+    public static boolean useRookBehindPasser = true;
 
     // Game-phase weight per piece TYPE; full opening phase sums to 24.
     private static final int[] PHASE_INC = {0, 1, 1, 2, 4, 0};
