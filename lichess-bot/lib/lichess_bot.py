@@ -752,6 +752,7 @@ def play_game(li: lichess.Lichess,
                                              correspondence_move_time,
                                              engine_cfg,
                                              fake_think_time(config, board, game))
+                            conversation.maybe_send_taunt(board)  # PERSONALITY FEATURE: taunt on a big lead
                             time.sleep(to_seconds(delay))
                         elif is_game_over(game):
                             tell_user_game_result(game, board)

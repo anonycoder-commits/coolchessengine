@@ -1,5 +1,7 @@
 """Allows lichess-bot to send messages to the chat."""
 import logging
+import random
+import chess
 from lib import model
 from lib.engine_wrapper import EngineWrapper
 from lib.lichess import Lichess
@@ -10,6 +12,31 @@ from typing import TypeAlias
 MULTIPROCESSING_LIST_TYPE: TypeAlias = Sequence[model.Challenge]
 
 logger = logging.getLogger(__name__)
+
+# PERSONALITY FEATURE: one-time taunt when the engine has a large lead. See maybe_send_taunt().
+MIN_MOVE_NUMBER_FOR_TAUNT = 12   # fullmove number; avoids opening-book/early-eval noise
+TAUNT_SCORE_THRESHOLD_CP = 250   # ~"clearly winning" (up a couple pawns / a minor piece)
+TAUNTS = [
+    "ooh, this position is looking pretty rough for you.",
+    "i think i like my chances here.",
+    "well, this is going swimmingly for me.",
+    "not gonna lie, i'm feeling pretty good about this one.",
+    "this is starting to feel like a formality.",
+    "i could get used to this kind of position.",
+    "hope you've got something clever cooking, because i sure like what i see.",
+]
+
+
+def is_winning_big(engine: EngineWrapper, board: chess.Board) -> bool:
+    """Return True if the engine's most recent score shows a large lead for our side."""
+    if board.fullmove_number < MIN_MOVE_NUMBER_FOR_TAUNT:
+        return False
+    if not engine.scores:
+        return False
+    cp = engine.scores[-1].relative.score(mate_score=100000)
+    if cp is None:
+        return False
+    return cp >= TAUNT_SCORE_THRESHOLD_CP
 
 
 class ChatLine:
@@ -45,6 +72,7 @@ class Conversation:
         self.version = version
         self.challengers = challenge_queue
         self.messages: list[ChatLine] = []
+        self.has_taunted = False  # PERSONALITY FEATURE: guards maybe_send_taunt to once per game
 
     command_prefix = "!"
 
@@ -104,3 +132,12 @@ class Conversation:
         """Send the message to the chat."""
         if message:
             self.send_reply(ChatLine({"room": room, "username": "", "text": ""}), message)
+
+    def maybe_send_taunt(self, board: chess.Board) -> None:
+        """PERSONALITY FEATURE: send a one-time taunt if the engine has a large lead."""
+        if self.has_taunted:
+            return
+        if not is_winning_big(self.engine, board):
+            return
+        self.has_taunted = True
+        self.send_message("player", random.choice(TAUNTS))

@@ -513,14 +513,26 @@ public final class Search {
     public void setPondering(boolean p) { pondering = p; }
     // Default OFF (data-driven): shipped enabled earlier on a biased-harness 56.9%, but a clean
     // unbiased referee re-gate scored corrHist-on at 48.2%/300 games (Elo -13, CI [-52,27]) --
-    // no evidence of gain at 100ms/move. Theoretically sound (standard in strong engines) and
-    // may pay off at slower TC or after eval tuning, so the code stays as a retest candidate.
+    // no evidence of gain at 100ms/move. RE-CONFIRMED 2026-07-04 on the distributed GitHub-Actions
+    // gate: 48.2%/600 games (Elo -13, CI [-41,+15]) -- same score, same point estimate, tighter CI,
+    // independent sample. Two aligned negative reads; not re-testing again without a real change
+    // to the eval (this engine's HCE has never been Texel-tuned) or an NNUE eval. Theoretically
+    // sound (standard in strong engines), so the code stays as a documented retest candidate
+    // rather than being deleted -- cheap to re-gate later if the eval landscape actually changes.
     public boolean useCorrectionHistory = false; // pawn-structure-keyed static-eval correction
 
-    // Adaptive time management: game-ply moves-to-go estimate + continuous stability/eval-trend
-    // stop-time scaling (see ADAPTIVE_* constants). Default OFF: it reshapes the delicate, tuned
-    // soft-bound logic, so it ships dormant until an unbiased referee gate (e.g. -tc 10+0.1 and
-    // 60+0.6) confirms a gain. Flip to true in a branch build and referee it against main.
+    // Adaptive time management: game-ply moves-to-go estimate + continuous stability/eval-trend/
+    // node-effort stop-time scaling (see ADAPTIVE_* constants). Default OFF, TESTED and PARKED
+    // (not "pending a gate" -- both required gates ran, 2026-07-04): -tc 10+0.1, 1500 games ->
+    // 51.8% (Elo +12, CI [-5,+30], ship-grade) but -tc <slower>, 600 games -> 48.2% (Elo -13,
+    // CI [-41,+15]). The two results are genuinely discordant, not just noisy -- exactly the
+    // failure mode requiring both a fast and a slow TC gate before shipping was meant to catch.
+    // Do not ship on the bullet result alone. Hypothesis if revisited: the node-effort factor
+    // likely sees more root moves earn a non-trivial node share at slower TCs (more time to
+    // explore alternatives), persistently pushing it toward "spend longer" in a way that may
+    // not suit this position mix -- untested. Kept as a working, already-gated retest candidate
+    // rather than deleted, since the underlying technique (node-effort scaling) is standard and
+    // the miscalibration looks like a constant-tuning problem, not a broken idea.
     public boolean useAdaptiveTime = false;
 
     // Obvious-move pruning: skip search entirely on a forced single reply, and cut

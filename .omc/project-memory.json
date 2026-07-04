@@ -19,7 +19,7 @@
   },
   "build": {
     "buildCommand": null,
-    "testCommand": null,
+    "testCommand": "cd \"C:/Users/svjat/dev/chess engine/lichess-bot\" && python -m pytest test_bot/test_conversation.py -q 2>&1 | tail -5",
     "lintCommand": null,
     "devCommand": null,
     "scripts": {}
@@ -109,20 +109,20 @@
   "hotPaths": [
     {
       "path": "src\\main\\java\\engine\\search\\Search.java",
-      "accessCount": 90,
-      "lastAccessed": 1783167836747,
+      "accessCount": 118,
+      "lastAccessed": 1783196187621,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\eval\\Evaluator.java",
-      "accessCount": 31,
-      "lastAccessed": 1783172621401,
+      "accessCount": 61,
+      "lastAccessed": 1783201776587,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\tools\\MatchRunner.java",
-      "accessCount": 26,
-      "lastAccessed": 1783174906897,
+      "accessCount": 29,
+      "lastAccessed": 1783198098964,
       "type": "file"
     },
     {
@@ -133,33 +133,63 @@
     },
     {
       "path": "src\\main\\java\\engine\\search\\LazySmpSearch.java",
-      "accessCount": 14,
-      "lastAccessed": 1783167806248,
-      "type": "file"
-    },
-    {
-      "path": "src\\main\\java\\engine\\tools\\Tune.java",
-      "accessCount": 8,
-      "lastAccessed": 1783168649161,
+      "accessCount": 16,
+      "lastAccessed": 1783179786534,
       "type": "file"
     },
     {
       "path": "lichess-bot\\config.yml",
+      "accessCount": 15,
+      "lastAccessed": 1783187932077,
+      "type": "file"
+    },
+    {
+      "path": "src\\main\\java\\engine\\tools\\Tune.java",
+      "accessCount": 15,
+      "lastAccessed": 1783201816490,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 9,
+      "lastAccessed": 1783194888828,
+      "type": "directory"
+    },
+    {
+      "path": "lichess-bot\\lib\\conversation.py",
       "accessCount": 8,
-      "lastAccessed": 1783168913171,
+      "lastAccessed": 1783189706368,
+      "type": "file"
+    },
+    {
+      "path": "src\\test\\java\\engine\\eval\\EvalRegressionTest.java",
+      "accessCount": 7,
+      "lastAccessed": 1783194479287,
+      "type": "file"
+    },
+    {
+      "path": "lichess-bot\\lib\\lichess_bot.py",
+      "accessCount": 6,
+      "lastAccessed": 1783187969574,
+      "type": "file"
+    },
+    {
+      "path": "src\\main\\java\\engine\\board\\Position.java",
+      "accessCount": 6,
+      "lastAccessed": 1783190097337,
+      "type": "file"
+    },
+    {
+      "path": "src\\main\\java\\engine\\tools\\Bench.java",
+      "accessCount": 6,
+      "lastAccessed": 1783194882623,
       "type": "file"
     },
     {
       "path": "src\\main\\java\\engine\\search",
-      "accessCount": 5,
-      "lastAccessed": 1783162778049,
+      "accessCount": 6,
+      "lastAccessed": 1783196178983,
       "type": "directory"
-    },
-    {
-      "path": "src\\main\\java\\engine\\board\\Position.java",
-      "accessCount": 5,
-      "lastAccessed": 1783167862092,
-      "type": "file"
     },
     {
       "path": "src\\test\\java\\engine\\eval\\OutsidePasserTest.java",
@@ -168,9 +198,9 @@
       "type": "file"
     },
     {
-      "path": "src\\test\\java\\engine\\eval\\EvalRegressionTest.java",
+      "path": "lichess-bot\\lib\\engine_wrapper.py",
       "accessCount": 5,
-      "lastAccessed": 1783172659300,
+      "lastAccessed": 1783187660704,
       "type": "file"
     },
     {
@@ -180,10 +210,10 @@
       "type": "file"
     },
     {
-      "path": "src\\main\\java\\engine\\tools\\Bench.java",
+      "path": "lichess-bot",
       "accessCount": 4,
-      "lastAccessed": 1783167823208,
-      "type": "file"
+      "lastAccessed": 1783187655276,
+      "type": "directory"
     },
     {
       "path": "src\\main\\java\\engine\\search\\SearchLimits.java",
@@ -198,10 +228,22 @@
       "type": "file"
     },
     {
-      "path": "",
+      "path": "src\\main\\java",
       "accessCount": 3,
-      "lastAccessed": 1783168626559,
+      "lastAccessed": 1783179796211,
       "type": "directory"
+    },
+    {
+      "path": "lichess-bot\\lib\\model.py",
+      "accessCount": 3,
+      "lastAccessed": 1783187676650,
+      "type": "file"
+    },
+    {
+      "path": "lichess-bot\\lib\\lichess.py",
+      "accessCount": 3,
+      "lastAccessed": 1783187719113,
+      "type": "file"
     },
     {
       "path": "migration_plan.md",
@@ -214,6 +256,30 @@
       "accessCount": 2,
       "lastAccessed": 1783170933479,
       "type": "file"
+    },
+    {
+      "path": "src\\test\\java\\engine\\search\\TimeManagementTest.java",
+      "accessCount": 2,
+      "lastAccessed": 1783180360642,
+      "type": "file"
+    },
+    {
+      "path": "lichess-bot\\wiki\\Extra-customizations.md",
+      "accessCount": 2,
+      "lastAccessed": 1783187260171,
+      "type": "file"
+    },
+    {
+      "path": "lichess-bot\\test_bot\\test_conversation.py",
+      "accessCount": 2,
+      "lastAccessed": 1783188137472,
+      "type": "file"
+    },
+    {
+      "path": "src\\main\\java\\engine",
+      "accessCount": 2,
+      "lastAccessed": 1783194879375,
+      "type": "directory"
     },
     {
       "path": "src\\main\\java\\engine\\search\\TranspositionTable.java",
@@ -258,12 +324,6 @@
       "type": "directory"
     },
     {
-      "path": "lichess-bot",
-      "accessCount": 1,
-      "lastAccessed": 1783116554810,
-      "type": "directory"
-    },
-    {
       "path": "src\\main\\java\\engine\\board",
       "accessCount": 1,
       "lastAccessed": 1783116939031,
@@ -297,6 +357,54 @@
       "path": "lichess-bot\\wiki\\Configure-lichess-bot.md",
       "accessCount": 1,
       "lastAccessed": 1783168617533,
+      "type": "directory"
+    },
+    {
+      "path": "lichess-bot\\lib",
+      "accessCount": 1,
+      "lastAccessed": 1783187144629,
+      "type": "directory"
+    },
+    {
+      "path": "lichess-bot\\README.md",
+      "accessCount": 1,
+      "lastAccessed": 1783187166578,
+      "type": "file"
+    },
+    {
+      "path": "lichess-bot\\extra_game_handlers.py",
+      "accessCount": 1,
+      "lastAccessed": 1783187259710,
+      "type": "file"
+    },
+    {
+      "path": "lichess-bot\\test_bot\\test_bot.py",
+      "accessCount": 1,
+      "lastAccessed": 1783187668238,
+      "type": "file"
+    },
+    {
+      "path": "lichess-bot\\lib\\config.py",
+      "accessCount": 1,
+      "lastAccessed": 1783187712878,
+      "type": "directory"
+    },
+    {
+      "path": "lichess-bot\\test_bot\\test_model.py",
+      "accessCount": 1,
+      "lastAccessed": 1783188083846,
+      "type": "file"
+    },
+    {
+      "path": "lichess-bot\\test_bot\\conftest.py",
+      "accessCount": 1,
+      "lastAccessed": 1783188096475,
+      "type": "file"
+    },
+    {
+      "path": "src",
+      "accessCount": 1,
+      "lastAccessed": 1783190115577,
       "type": "directory"
     }
   ],
