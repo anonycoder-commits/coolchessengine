@@ -515,7 +515,7 @@ public final class Search {
     // unbiased referee re-gate scored corrHist-on at 48.2%/300 games (Elo -13, CI [-52,27]) --
     // no evidence of gain at 100ms/move. Theoretically sound (standard in strong engines) and
     // may pay off at slower TC or after eval tuning, so the code stays as a retest candidate.
-    public boolean useCorrectionHistory = false; // pawn-structure-keyed static-eval correction
+    public boolean useCorrectionHistory = true; // pawn-structure-keyed static-eval correction
 
     // Adaptive time management: game-ply moves-to-go estimate + continuous stability/eval-trend
     // stop-time scaling (see ADAPTIVE_* constants). Default OFF: it reshapes the delicate, tuned
