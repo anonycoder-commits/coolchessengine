@@ -521,7 +521,7 @@ public final class Search {
     // stop-time scaling (see ADAPTIVE_* constants). Default OFF: it reshapes the delicate, tuned
     // soft-bound logic, so it ships dormant until an unbiased referee gate (e.g. -tc 10+0.1 and
     // 60+0.6) confirms a gain. Flip to true in a branch build and referee it against main.
-    public boolean useAdaptiveTime = false;
+    public boolean useAdaptiveTime = true;
 
     // Obvious-move pruning: skip search entirely on a forced single reply, and cut
     // iterative deepening short once a shallow iteration shows a lopsided root gap.
