@@ -473,7 +473,7 @@ public final class Search {
     // after the propagation/scale bug fixes -- no evidence of gain at fast TC. Candidates to
     // re-enable if a longer-TC retest or a post-Texel-tuning run shows a positive score.
     public boolean useCaptureHistory = false; // capture-history ordering refinement
-    public boolean useCutnodeLmr = false;   // reduce one extra ply at expected cut-nodes
+    public boolean useCutnodeLmr = true;   // reduce one extra ply at expected cut-nodes
     public boolean useSingular = true;     // singular extensions + multicut (needs the TT)
     // Bundle D: gated ON (2026-07-04) after a 600-game referee gate at -movetime 100 scored
     // 51.7% (+168 -147 =285, Elo +12 [-16,40]) -- positive lean, standard techniques, bounded
