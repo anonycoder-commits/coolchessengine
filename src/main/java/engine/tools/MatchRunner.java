@@ -90,6 +90,7 @@ public final class MatchRunner {
         int games = DEFAULT_GAMES;
         int movetimeMs = DEFAULT_MOVETIME_MS;
         int concurrency = DEFAULT_CONCURRENCY;
+        int startGame = 0; // global game index this invocation's local game 0 corresponds to
         TimeControl tc = null; // null => fixed movetime (existing behaviour)
         List<String> commonOptions = new ArrayList<>();   // -option: sent to BOTH engines
         List<String> engineOptions = new ArrayList<>();   // -eopt: tested engine only
@@ -103,6 +104,7 @@ public final class MatchRunner {
                     case "-games": games = Integer.parseInt(args[++i]); break;
                     case "-movetime": movetimeMs = Integer.parseInt(args[++i]); break;
                     case "-concurrency": concurrency = Integer.parseInt(args[++i]); break;
+                    case "-startGame": startGame = Integer.parseInt(args[++i]); break;
                     case "-tc": tc = TimeControl.parse(args[++i]); break;
                     case "-option": commonOptions.add(parseOption(args[++i])); break;
                     case "-eopt": engineOptions.add(parseOption(args[++i])); break;
@@ -133,7 +135,7 @@ public final class MatchRunner {
 
         validateOpenings(); // fail fast on a book typo, before spawning any subprocess
         new MatchRunner().run(enginePath, opponentPath, games, movetimeMs, Math.max(1, concurrency),
-                tc, engineOpts, opponentOpts);
+                startGame, tc, engineOpts, opponentOpts);
     }
 
     /** Parses {@code NAME=VALUE} into a {@code setoption}-ready "NAME value VALUE" body. NAME may
@@ -193,6 +195,11 @@ public final class MatchRunner {
         System.out.println("                    sends wtime/btime/winc/binc and adjudicates time forfeits.");
         System.out.println("  -option/-eopt/-oopt -> setoption sent to both / tested engine / opponent");
         System.out.println("                    (quote names with spaces, e.g. -eopt \"Move Overhead=100\").");
+        System.out.println("  -startGame N   -> this invocation's local game 0 is global game N (default 0).");
+        System.out.println("                    Use when sharding one big gate across parallel processes/");
+        System.out.println("                    machines, so openings/colors interleave the same way a single");
+        System.out.println("                    unsharded run would -- e.g. 600 games across 6 shards of 100:");
+        System.out.println("                    shard k runs '-games 100 -startGame ' + (k*100).");
     }
 
     private static void validateOpenings() {
@@ -231,7 +238,7 @@ public final class MatchRunner {
     }
 
     private void run(String enginePath, String opponentPath, int games, int movetimeMs, int concurrency,
-                     TimeControl tc, List<String> engineOpts, List<String> opponentOpts) {
+                     int startGame, TimeControl tc, List<String> engineOpts, List<String> opponentOpts) {
         System.out.println(enginePath == null
                 ? "Mode: in-process tested engine (BIASED -- smoke checks only)"
                 : "Mode: referee (both subprocess -- unbiased)");
@@ -243,8 +250,14 @@ public final class MatchRunner {
         boolean[] engineWhiteByGame = new boolean[games];
         try {
             for (int g = 0; g < games; g++) {
-                final boolean engineIsWhite = (g % 2 == 0);
-                final String opening = OPENINGS[(g / 2) % OPENINGS.length];
+                // globalG lets a sharded invocation (this run covers global games
+                // [startGame, startGame+games)) pick up the same color/opening sequence a single
+                // unsharded run of the full game count would have used at this point -- so
+                // splitting one big gate across N parallel processes doesn't skew which openings
+                // and colors get how much coverage relative to running it all in one process.
+                final int globalG = g + startGame;
+                final boolean engineIsWhite = (globalG % 2 == 0);
+                final String opening = OPENINGS[(globalG / 2) % OPENINGS.length];
                 engineWhiteByGame[g] = engineIsWhite;
                 futures.add(pool.submit(gameTask(enginePath, opponentPath, engineIsWhite, opening,
                         movetimeMs, tc, engineOpts, opponentOpts)));

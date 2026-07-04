@@ -1,0 +1,219 @@
+name: Self-play gate
+
+# Runs a referee-mode MatchRunner self-play gate (candidate vs baseline build) sharded across
+# several parallel GitHub-hosted runners, then combines the results into one overall score/Elo
+# estimate -- the same statistics MatchRunner itself reports for an unsharded run, just computed
+# faster by spreading the games across more cores than one machine has.
+#
+# Manual only (workflow_dispatch): this consumes Actions minutes and is meant to be run
+# deliberately for a specific gate, not on every push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        # workflow_dispatch input defaults must be a static string (no ${{ }} expressions
+        # allowed here) -- override this in the "Run workflow" form with your actual
+        # branch/tag/commit each time you dispatch.
+        description: "Git ref to build as the tested engine (branch, tag, or commit SHA) -- fill this in, the default below is just a placeholder"
+        required: true
+        default: "main"
+      baseline_ref:
+        description: "Git ref to build as the opponent baseline"
+        required: true
+        default: "main"
+      games:
+        description: "Total games across all shards"
+        required: true
+        default: "600"
+      movetime:
+        description: "Fixed movetime in ms (leave games/movetime as-is for the session's usual gate; use a -tc value instead via extra_args if you want a clock-based gate)"
+        required: true
+        default: "100"
+      shards:
+        description: "Number of parallel shards"
+        required: true
+        default: "6"
+        type: choice
+        options: ["1", "2", "3", "4", "6", "8", "12"]
+      extra_args:
+        description: "Extra MatchRunner args appended to every shard, e.g. -tc 10+0.1 (overrides movetime) or -eopt \"Threads=2\""
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout candidate ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_ref }}
+          path: candidate
+      - name: Checkout baseline ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.baseline_ref }}
+          path: baseline
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Build candidate
+        working-directory: candidate
+        run: chmod +x gradlew && ./gradlew compileJava -q
+      - name: Build baseline
+        working-directory: baseline
+        run: chmod +x gradlew && ./gradlew compileJava -q
+      - name: Upload candidate classes
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-classes
+          path: candidate/build/classes/java/main
+          retention-days: 1
+      - name: Upload baseline classes
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-classes
+          path: baseline/build/classes/java/main
+          retention-days: 1
+
+  gate:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Fixed 12-slot matrix (max option in the shards choice list); slots >= the requested
+        # shard count skip themselves immediately in the first step below. A dynamic matrix
+        # sized exactly to the input would need an extra job to compute it via fromJSON(), which
+        # trades this small amount of wasted (near-instant) job overhead for real YAML complexity.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - name: Skip if shard index >= requested shard count
+        id: check
+        run: |
+          if [ "${{ matrix.shard }}" -ge "${{ inputs.shards }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set up JDK 25
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Download candidate classes
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-classes
+          path: candidate-classes
+      - name: Download baseline classes
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: baseline-classes
+          path: baseline-classes
+      - name: Run this shard
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          TOTAL=${{ inputs.games }}
+          SHARDS=${{ inputs.shards }}
+          IDX=${{ matrix.shard }}
+          # Distribute any remainder across the first (TOTAL % SHARDS) shards so counts differ
+          # by at most 1, and each shard's -startGame lines up with a single unsharded run's
+          # sequential game numbering (see MatchRunner's -startGame doc).
+          BASE=$(( TOTAL / SHARDS ))
+          REM=$(( TOTAL % SHARDS ))
+          if [ "$IDX" -lt "$REM" ]; then
+            MY_GAMES=$(( BASE + 1 ))
+            START=$(( IDX * (BASE + 1) ))
+          else
+            MY_GAMES=$BASE
+            START=$(( REM * (BASE + 1) + (IDX - REM) * BASE ))
+          fi
+          echo "Shard $IDX: $MY_GAMES games starting at global game $START"
+          # MatchRunner (engine.tools.MatchRunner) is compiled into candidate-classes, same as
+          # every other engine.* class -- no separate "runner" artifact needed.
+          java -cp candidate-classes engine.tools.MatchRunner \
+            -engine cp:candidate-classes -opponent cp:baseline-classes \
+            -games "$MY_GAMES" -movetime ${{ inputs.movetime }} -startGame "$START" \
+            -concurrency 2 ${{ inputs.extra_args }} | tee shard-output.txt
+      - name: Extract shard tally
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          # Use Python's re (not grep -P) to parse MatchRunner's
+          # "Result: +W -L =D, score X% over N games | Elo ..." line -- more portably reliable
+          # across locales/runner images than PCRE lookaround via grep -oP.
+          python3 - <<'PYEOF'
+          import re
+          w = l = d = 0
+          forfeit_line = ""
+          with open("shard-output.txt") as f:
+              for line in f:
+                  m = re.match(r"Result: \+(\d+) -(\d+) =(\d+),", line)
+                  if m:
+                      w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                  if line.startswith("Time forfeits:"):
+                      forfeit_line = line.strip()
+          with open("shard-tally.txt", "w") as f:
+              f.write(f"{w} {l} {d}\n")
+          print(f"Parsed tally: W={w} L={l} D={d}")
+          if forfeit_line:
+              print(f"::warning::Shard ${{ matrix.shard }} had time forfeits: {forfeit_line}")
+          PYEOF
+      - name: Upload shard tally
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-tally-${{ matrix.shard }}
+          path: shard-tally.txt
+          retention-days: 1
+
+  aggregate:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all shard tallies
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-tally-*
+          path: tallies
+          merge-multiple: false
+      - name: Combine and report
+        run: |
+          python3 - <<'PYEOF'
+          import glob, math
+
+          w = l = d = 0
+          for f in glob.glob("tallies/*/shard-tally.txt"):
+              with open(f) as fh:
+                  parts = fh.read().split()
+                  if len(parts) == 3:
+                      w += int(parts[0]); l += int(parts[1]); d += int(parts[2])
+
+          n = w + l + d
+          score = (w + 0.5 * d) / n if n else 0.0
+
+          def elo(s):
+              s = max(1e-4, min(1 - 1e-4, s))
+              return -400.0 * math.log10(1.0 / s - 1.0)
+
+          def wilson(p, n):
+              z = 1.96
+              z2 = z * z
+              denom = 1 + z2 / n
+              centre = (p + z2 / (2 * n)) / denom
+              half = z * math.sqrt(p * (1 - p) / n + z2 / (4.0 * n * n)) / denom
+              return max(0.0, centre - half), min(1.0, centre + half)
+
+          print(f"Combined result: +{w} -{l} ={d} over {n} games, score {score*100:.1f}%")
+          if 0 < score < 1:
+              lo, hi = wilson(score, n)
+              print(f"Elo {elo(score):+.0f} [{elo(lo):+.0f}, {elo(hi):+.0f}] (95%)")
+          PYEOF
