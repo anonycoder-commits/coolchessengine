@@ -115,6 +115,33 @@ public final class Evaluator {
     // by how advanced the passer already is.
     public static int PASSER_KING_EG = 5;
 
+    // Outside passed pawn (endgame only): a passer whose file is far from the enemy king is one
+    // the king struggles to stop -- it decoys the king off the other wing and often decides the
+    // game. This is the motif the engine was blind to in a loss where a queenside majority
+    // became a winning outside a-pawn. Eg-only (like PASSER_KING_EG), scaled by how advanced the
+    // passer already is.
+    // Default ON (2026-07-04): unbiased referee gate scored 51.2% over 600 games (Elo +8,
+    // CI [-20,36]) -- grey-zone/no-regression on aggregate self-play, which balanced fast-TC
+    // openings rarely exercise anyway (same reasoning as the storm/rule50 terms). Kept on
+    // because a dedicated probe confirms it fixes the targeted motif: a lone outside a-pawn
+    // position scores +19cp with this term on vs off, and remains exactly color-symmetric.
+    public static int OUTSIDE_PASSER_EG = 22;
+    public static int OUTSIDE_KING_DIST = 3; // enemy-king file distance at/above which a passer is "outside"
+    public static boolean useOutsidePasser = true;
+
+    // Outside flank pawn majority (endgame only): more pawns than the enemy on the flank AWAY
+    // from the enemy king can manufacture a passer the king is too far to catch -- the classic
+    // "queenside majority" trump. Gated SEPARATELY from the outside-passer term (a fuzzier
+    // signal shouldn't be able to sink the higher-confidence one).
+    // Default ON (2026-07-04): unbiased referee gate (vs the outside-passer-on baseline) scored
+    // 51.7% over 600 games (Elo +12, CI [-16,40]) -- same grey-zone-positive read as the outside-
+    // passer term itself; kept for the same reason (narrow anti-specific-loss term, verified to
+    // fix the targeted motif and exactly color-symmetric via OutsidePasserTest).
+    public static int PAWN_MAJORITY_EG = 12;
+    public static boolean usePawnMajority = true;
+    private static final long QUEENSIDE_FILES = 0x0F0F0F0F0F0F0F0FL; // files a-d
+    private static final long KINGSIDE_FILES = 0xF0F0F0F0F0F0F0F0L;  // files e-h
+
     // Connected/phalanx pawn bonus and backward-pawn penalty (small, standard mg/eg pairs).
     public static int CONNECTED_MG = 8;
     public static int CONNECTED_EG = 6;
@@ -510,6 +537,12 @@ public final class Evaluator {
         int wk = pos.kingSquare(WHITE);
         int bk = pos.kingSquare(BLACK);
         int eg = passerKingEg(wPassers, WHITE, wk, bk) - passerKingEg(bPassers, BLACK, bk, wk);
+        if (useOutsidePasser) {
+            eg += outsidePasserEg(wPassers, WHITE, bk) - outsidePasserEg(bPassers, BLACK, wk);
+        }
+        if (usePawnMajority) {
+            eg += flankMajorityEg(wp, bp, bk) - flankMajorityEg(bp, wp, wk);
+        }
         return taper(mgOf(packed), egOf(packed) + eg);
     }
 
@@ -539,6 +572,33 @@ public final class Evaluator {
             eg += PASSER_KING_EG * prox * rel / 6;
         }
         return eg;
+    }
+
+    /** Endgame bonus for {@code color}'s passers that sit far (by file) from the enemy king --
+     *  an "outside" passer the king can't easily stop. Scaled by the passer's advancement,
+     *  mirroring {@link #passerKingEg}. See OUTSIDE_PASSER_EG / OUTSIDE_KING_DIST. */
+    private static int outsidePasserEg(long passers, int color, int enemyKing) {
+        int eg = 0;
+        int ekFile = enemyKing & 7;
+        while (passers != 0) {
+            int sq = Long.numberOfTrailingZeros(passers);
+            passers &= passers - 1;
+            int f = sq & 7;
+            int rel = color == WHITE ? (sq >> 3) : 7 - (sq >> 3);
+            if (Math.abs(f - ekFile) >= OUTSIDE_KING_DIST) {
+                eg += OUTSIDE_PASSER_EG * rel / 6;
+            }
+        }
+        return eg;
+    }
+
+    /** Endgame bonus for a pawn majority on the flank away from the enemy king -- an outside
+     *  majority that can produce a passer the king is too distant to catch. See PAWN_MAJORITY_EG. */
+    private static int flankMajorityEg(long ownPawns, long enemyPawns, int enemyKing) {
+        long farFlank = (enemyKing & 7) >= 4 ? QUEENSIDE_FILES : KINGSIDE_FILES;
+        int own = Long.bitCount(ownPawns & farFlank);
+        int enemy = Long.bitCount(enemyPawns & farFlank);
+        return own > enemy ? PAWN_MAJORITY_EG * (own - enemy) : 0;
     }
 
     /** Pawn-structure terms that depend ONLY on the two pawn bitboards (cacheable): doubled,

@@ -50,6 +50,10 @@ public final class MatchRunner {
     private static final int DEFAULT_MOVETIME_MS = 100;
     private static final int DEFAULT_CONCURRENCY = 2;
     private static final int MAX_PLIES = 300;
+    // Slack on clock-based forfeit adjudication, absorbing subprocess pipe/scheduling latency so
+    // the harness's own overhead never forfeits a side that managed its clock correctly. Real
+    // time-management regressions overrun by far more than this.
+    private static final long TIME_FORFEIT_GRACE_MS = 20;
 
     /** Balanced, well-known opening lines (6-10 plies) as UCI move strings. Each is played by
      *  both colors (see class doc). Validated at startup -- a typo aborts before any game. */
@@ -86,20 +90,35 @@ public final class MatchRunner {
         int games = DEFAULT_GAMES;
         int movetimeMs = DEFAULT_MOVETIME_MS;
         int concurrency = DEFAULT_CONCURRENCY;
+        TimeControl tc = null; // null => fixed movetime (existing behaviour)
+        List<String> commonOptions = new ArrayList<>();   // -option: sent to BOTH engines
+        List<String> engineOptions = new ArrayList<>();   // -eopt: tested engine only
+        List<String> opponentOptions = new ArrayList<>(); // -oopt: opponent only
 
-        for (int i = 0; i < args.length; i++) {
-            switch (args[i]) {
-                case "-engine": enginePath = args[++i]; break;
-                case "-opponent": opponentPath = args[++i]; break;
-                case "-games": games = Integer.parseInt(args[++i]); break;
-                case "-movetime": movetimeMs = Integer.parseInt(args[++i]); break;
-                case "-concurrency": concurrency = Integer.parseInt(args[++i]); break;
-                default:
-                    System.err.println("Unknown argument: " + args[i]);
-                    printUsage();
-                    System.exit(1);
-                    return;
+        try {
+            for (int i = 0; i < args.length; i++) {
+                switch (args[i]) {
+                    case "-engine": enginePath = args[++i]; break;
+                    case "-opponent": opponentPath = args[++i]; break;
+                    case "-games": games = Integer.parseInt(args[++i]); break;
+                    case "-movetime": movetimeMs = Integer.parseInt(args[++i]); break;
+                    case "-concurrency": concurrency = Integer.parseInt(args[++i]); break;
+                    case "-tc": tc = TimeControl.parse(args[++i]); break;
+                    case "-option": commonOptions.add(parseOption(args[++i])); break;
+                    case "-eopt": engineOptions.add(parseOption(args[++i])); break;
+                    case "-oopt": opponentOptions.add(parseOption(args[++i])); break;
+                    default:
+                        System.err.println("Unknown argument: " + args[i]);
+                        printUsage();
+                        System.exit(1);
+                        return;
+                }
             }
+        } catch (IllegalArgumentException e) {
+            System.err.println(e.getMessage());
+            printUsage();
+            System.exit(1);
+            return;
         }
 
         if (opponentPath == null || !checkSpec(opponentPath) || (enginePath != null && !checkSpec(enginePath))) {
@@ -108,8 +127,43 @@ public final class MatchRunner {
             return;
         }
 
+        // -option applies to both; the per-engine lists layer on top.
+        List<String> engineOpts = new ArrayList<>(commonOptions); engineOpts.addAll(engineOptions);
+        List<String> opponentOpts = new ArrayList<>(commonOptions); opponentOpts.addAll(opponentOptions);
+
         validateOpenings(); // fail fast on a book typo, before spawning any subprocess
-        new MatchRunner().run(enginePath, opponentPath, games, movetimeMs, Math.max(1, concurrency));
+        new MatchRunner().run(enginePath, opponentPath, games, movetimeMs, Math.max(1, concurrency),
+                tc, engineOpts, opponentOpts);
+    }
+
+    /** Parses {@code NAME=VALUE} into a {@code setoption}-ready "NAME value VALUE" body. NAME may
+     *  contain spaces (quote the whole arg on the command line, e.g. {@code -option "Move Overhead=100"}). */
+    private static String parseOption(String spec) {
+        int eq = spec.indexOf('=');
+        if (eq <= 0 || eq == spec.length() - 1) {
+            throw new IllegalArgumentException("Bad -option (expected NAME=VALUE): " + spec);
+        }
+        return spec.substring(0, eq).trim() + " value " + spec.substring(eq + 1).trim();
+    }
+
+    /** Clock-based time control parsed from {@code BASE+INC} in seconds (e.g. {@code 10+0.1},
+     *  {@code 60+0.6}). Stored internally as milliseconds per side. */
+    private static final class TimeControl {
+        final long baseMs;
+        final long incMs;
+        TimeControl(long baseMs, long incMs) { this.baseMs = baseMs; this.incMs = incMs; }
+
+        static TimeControl parse(String spec) {
+            int plus = spec.indexOf('+');
+            if (plus < 0) throw new IllegalArgumentException("Bad -tc (expected BASE+INC seconds): " + spec);
+            try {
+                double base = Double.parseDouble(spec.substring(0, plus));
+                double inc = Double.parseDouble(spec.substring(plus + 1));
+                return new TimeControl(Math.round(base * 1000), Math.round(inc * 1000));
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Bad -tc (expected BASE+INC seconds): " + spec);
+            }
+        }
     }
 
     /** Player spec is either {@code cp:<classes-dir>} (our own build: launched by invoking
@@ -129,11 +183,16 @@ public final class MatchRunner {
 
     private static void printUsage() {
         System.out.println("Usage: MatchRunner [-engine <spec>] -opponent <spec> "
-                + "[-games N] [-movetime ms] [-concurrency N]");
+                + "[-games N] [-movetime ms | -tc BASE+INC] [-concurrency N]");
+        System.out.println("       [-option NAME=VALUE] [-eopt NAME=VALUE] [-oopt NAME=VALUE]");
         System.out.println("  <spec> is either cp:<classes-dir> for our own build (direct java exec, no");
         System.out.println("  shell hop -- fast) or a path to an external UCI engine executable.");
         System.out.println("  -engine given  -> referee mode (both subprocess, unbiased; use for gates)");
         System.out.println("  -engine absent -> tested engine runs in-process (fast, biased; smoke only)");
+        System.out.println("  -tc BASE+INC   -> clock-based control in seconds (e.g. 10+0.1, 60+0.6);");
+        System.out.println("                    sends wtime/btime/winc/binc and adjudicates time forfeits.");
+        System.out.println("  -option/-eopt/-oopt -> setoption sent to both / tested engine / opponent");
+        System.out.println("                    (quote names with spaces, e.g. -eopt \"Move Overhead=100\").");
     }
 
     private static void validateOpenings() {
@@ -153,6 +212,10 @@ public final class MatchRunner {
 
     // Synchronized tally (games complete on multiple threads).
     private int wins, losses, draws, failed;
+    private int engineTimeForfeits, opponentTimeForfeits;
+    // Aggregate search depth of the TESTED engine, for interpreting time-management gates.
+    private final java.util.concurrent.atomic.AtomicLong testedDepthSum = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong testedMoveCount = new java.util.concurrent.atomic.AtomicLong();
 
     private synchronized void tally(GameResult result, boolean engineIsWhite) {
         if (result == null) { failed++; return; }
@@ -163,10 +226,18 @@ public final class MatchRunner {
         }
     }
 
-    private void run(String enginePath, String opponentPath, int games, int movetimeMs, int concurrency) {
+    private synchronized void noteTimeForfeit(boolean testedEngine) {
+        if (testedEngine) engineTimeForfeits++; else opponentTimeForfeits++;
+    }
+
+    private void run(String enginePath, String opponentPath, int games, int movetimeMs, int concurrency,
+                     TimeControl tc, List<String> engineOpts, List<String> opponentOpts) {
         System.out.println(enginePath == null
                 ? "Mode: in-process tested engine (BIASED -- smoke checks only)"
                 : "Mode: referee (both subprocess -- unbiased)");
+        System.out.println(tc == null
+                ? "Time control: fixed " + movetimeMs + "ms/move"
+                : "Time control: " + (tc.baseMs / 1000.0) + "+" + (tc.incMs / 1000.0) + " (clock-based)");
         ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         List<Future<GameResult>> futures = new ArrayList<>(games);
         boolean[] engineWhiteByGame = new boolean[games];
@@ -175,7 +246,8 @@ public final class MatchRunner {
                 final boolean engineIsWhite = (g % 2 == 0);
                 final String opening = OPENINGS[(g / 2) % OPENINGS.length];
                 engineWhiteByGame[g] = engineIsWhite;
-                futures.add(pool.submit(gameTask(enginePath, opponentPath, engineIsWhite, opening, movetimeMs)));
+                futures.add(pool.submit(gameTask(enginePath, opponentPath, engineIsWhite, opening,
+                        movetimeMs, tc, engineOpts, opponentOpts)));
             }
             for (int g = 0; g < games; g++) {
                 GameResult result;
@@ -200,14 +272,17 @@ public final class MatchRunner {
     }
 
     private Callable<GameResult> gameTask(String enginePath, String opponentPath,
-                                          boolean engineIsWhite, String opening, int movetimeMs) {
+                                          boolean engineIsWhite, String opening, int movetimeMs,
+                                          TimeControl tc, List<String> engineOpts, List<String> opponentOpts) {
         return () -> {
-            Player engine = (enginePath == null) ? new InProcessEngine() : new SubprocessEngine(enginePath);
-            Player opponent = new SubprocessEngine(opponentPath);
+            Player engine = (enginePath == null)
+                    ? new InProcessEngine()
+                    : new SubprocessEngine(enginePath, engineOpts, true, this);
+            Player opponent = new SubprocessEngine(opponentPath, opponentOpts, false, this);
             try {
                 Player white = engineIsWhite ? engine : opponent;
                 Player black = engineIsWhite ? opponent : engine;
-                return playGame(white, black, opening, movetimeMs);
+                return playGame(white, black, engineIsWhite, opening, movetimeMs, tc);
             } finally {
                 engine.close();
                 opponent.close();
@@ -226,6 +301,15 @@ public final class MatchRunner {
             sb.append(String.format(" | Elo %+.0f [%.0f, %.0f] (95%%)", elo(score), elo(ci[0]), elo(ci[1])));
         }
         System.out.println(sb);
+        if (engineTimeForfeits > 0 || opponentTimeForfeits > 0) {
+            System.out.printf("Time forfeits: tested engine %d, opponent %d%n",
+                    engineTimeForfeits, opponentTimeForfeits);
+        }
+        long moves = testedMoveCount.get();
+        if (moves > 0) {
+            System.out.printf("Tested engine avg depth: %.1f over %d moves%n",
+                    testedDepthSum.get() / (double) moves, moves);
+        }
     }
 
     private static double elo(double score) {
@@ -244,8 +328,11 @@ public final class MatchRunner {
     private enum GameResult { WHITE_WINS, BLACK_WINS, DRAW }
 
     /** Referees one game between two players, adjudicating termination itself. Players only
-     *  ever receive the move list (symmetric) and return a UCI move. */
-    private GameResult playGame(Player white, Player black, String opening, int movetimeMs) {
+     *  ever receive the move list (symmetric) and return a UCI move. Under a clock-based
+     *  {@link TimeControl}, per-side clocks are maintained here and a side that overruns its
+     *  clock (beyond a small pipe-latency grace) forfeits on time. */
+    private GameResult playGame(Player white, Player black, boolean engineIsWhite,
+                                String opening, int movetimeMs, TimeControl tc) {
         Position pos = Position.startpos();
         white.newGame();
         black.newGame();
@@ -257,6 +344,9 @@ public final class MatchRunner {
             uciMoves.add(uci);
             pos.makeMove(findMove(legal, uci));
         }
+
+        long whiteClock = tc == null ? 0 : tc.baseMs;
+        long blackClock = tc == null ? 0 : tc.baseMs;
 
         for (int ply = 0; ply < MAX_PLIES; ply++) {
             MoveList legal = new MoveList();
@@ -270,12 +360,31 @@ public final class MatchRunner {
             }
             if (pos.isDrawByRuleOrRepetition()) return GameResult.DRAW;
 
-            Player toMove = pos.sideToMove() == Piece.WHITE ? white : black;
-            String uci = toMove.bestMove(uciMoves, movetimeMs);
+            boolean whiteToMove = pos.sideToMove() == Piece.WHITE;
+            Player toMove = whiteToMove ? white : black;
+            GoRequest req = tc == null
+                    ? GoRequest.moveTime(movetimeMs)
+                    : GoRequest.clock(whiteClock, blackClock, tc.incMs, tc.incMs);
+
+            long startNanos = System.nanoTime();
+            String uci = toMove.bestMove(uciMoves, req);
+            long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
+
+            if (tc != null) {
+                // Deduct wall time; the increment is credited only if the side had time left.
+                boolean testedToMove = (whiteToMove == engineIsWhite);
+                if (whiteToMove) whiteClock -= elapsedMs; else blackClock -= elapsedMs;
+                long remaining = whiteToMove ? whiteClock : blackClock;
+                if (remaining < -TIME_FORFEIT_GRACE_MS) {
+                    noteTimeForfeit(testedToMove);
+                    return whiteToMove ? GameResult.BLACK_WINS : GameResult.WHITE_WINS;
+                }
+                if (whiteToMove) whiteClock += tc.incMs; else blackClock += tc.incMs;
+            }
+
             int move = findMove(legal, uci);
             if (move == 0) {
                 // Unparseable/illegal move: the side to move forfeits.
-                boolean whiteToMove = pos.sideToMove() == Piece.WHITE;
                 return whiteToMove ? GameResult.BLACK_WINS : GameResult.WHITE_WINS;
             }
             uciMoves.add(Move.toUci(move));
@@ -302,8 +411,39 @@ public final class MatchRunner {
 
     private interface Player {
         void newGame();
-        String bestMove(List<String> movesSoFar, int movetimeMs);
+        String bestMove(List<String> movesSoFar, GoRequest req);
         void close();
+    }
+
+    /** A single search request: either a fixed movetime, or per-side clocks + increments. */
+    private static final class GoRequest {
+        final int movetimeMs;                 // >0 => fixed-movetime mode
+        final long wtimeMs, btimeMs, wincMs, bincMs;
+        final boolean clockMode;
+
+        private GoRequest(int movetimeMs, long wtimeMs, long btimeMs, long wincMs, long bincMs, boolean clockMode) {
+            this.movetimeMs = movetimeMs; this.wtimeMs = wtimeMs; this.btimeMs = btimeMs;
+            this.wincMs = wincMs; this.bincMs = bincMs; this.clockMode = clockMode;
+        }
+
+        static GoRequest moveTime(int ms) { return new GoRequest(ms, 0, 0, 0, 0, false); }
+
+        static GoRequest clock(long wtime, long btime, long winc, long binc) {
+            return new GoRequest(0, wtime, btime, winc, binc, true);
+        }
+
+        /** The UCI {@code go} command body (without the leading "go "). */
+        String uci() {
+            if (!clockMode) return "movetime " + movetimeMs;
+            return "wtime " + Math.max(1, wtimeMs) + " btime " + Math.max(1, btimeMs)
+                    + " winc " + wincMs + " binc " + bincMs;
+        }
+
+        /** Upper bound the referee waits for a reply before treating the engine as hung. */
+        long timeoutMs() {
+            long budget = clockMode ? Math.max(wtimeMs, btimeMs) : movetimeMs;
+            return Math.max(3000, budget * 10L) + 5000;
+        }
     }
 
     /** In-process tested engine (legacy, biased -- see class doc). Rebuilds the board from the
@@ -314,14 +454,17 @@ public final class MatchRunner {
 
         @Override public void newGame() { search.newGame(); }
 
-        @Override public String bestMove(List<String> movesSoFar, int movetimeMs) {
+        @Override public String bestMove(List<String> movesSoFar, GoRequest req) {
             Position pos = Position.startpos();
             for (String u : movesSoFar) {
                 MoveList legal = new MoveList();
                 MoveGenerator.generateLegal(pos, legal);
                 pos.makeMove(findMove(legal, u));
             }
-            int move = search.think(pos, SearchLimits.moveTime(movetimeMs));
+            SearchLimits limits = req.clockMode
+                    ? SearchLimits.clock((int) req.wtimeMs, (int) req.btimeMs, (int) req.wincMs, (int) req.bincMs)
+                    : SearchLimits.moveTime(req.movetimeMs);
+            int move = search.think(pos, limits);
             if (move == 0) {
                 MoveList legal = new MoveList();
                 MoveGenerator.generateLegal(pos, legal);
@@ -349,12 +492,16 @@ public final class MatchRunner {
 
         private final Process process;
         private final PrintWriter in;
+        private final boolean tested;      // is this the tested engine? (attributes depth/forfeits)
+        private final MatchRunner owner;   // for depth aggregation
         private final java.util.concurrent.BlockingQueue<String> lines = new java.util.concurrent.LinkedBlockingQueue<>();
         // Sentinel enqueued by the reader thread on stream EOF/error, so a poller blocked past
         // that point unblocks immediately instead of waiting out its full timeout for nothing.
         private static final String EOF = new Object().toString();
 
-        SubprocessEngine(String spec) throws IOException {
+        SubprocessEngine(String spec, List<String> options, boolean tested, MatchRunner owner) throws IOException {
+            this.tested = tested;
+            this.owner = owner;
             ProcessBuilder pb = spec.startsWith("cp:")
                     // Direct java exec: no cmd.exe/.bat hop (that indirection roughly doubled
                     // process-spawn latency and, under concurrency, caused severe stalls --
@@ -370,6 +517,9 @@ public final class MatchRunner {
             if (awaitLine("uciok", HANDSHAKE_TIMEOUT_MS) == null) {
                 throw new IOException("no uciok from " + spec + " within " + HANDSHAKE_TIMEOUT_MS + "ms");
             }
+            // Apply UCI options after 'uciok' (the engine has declared them) and before the
+            // readiness barrier, so Threads/Hash/etc. are in effect for the first search.
+            for (String opt : options) send("setoption name " + opt);
             send("isready");
             if (awaitLine("readyok", HANDSHAKE_TIMEOUT_MS) == null) {
                 throw new IOException("no readyok from " + spec + " within " + HANDSHAKE_TIMEOUT_MS + "ms");
@@ -394,22 +544,61 @@ public final class MatchRunner {
             awaitLine("readyok", HANDSHAKE_TIMEOUT_MS);
         }
 
-        @Override public String bestMove(List<String> movesSoFar, int movetimeMs) {
+        @Override public String bestMove(List<String> movesSoFar, GoRequest req) {
             StringBuilder cmd = new StringBuilder("position startpos");
             if (!movesSoFar.isEmpty()) {
                 cmd.append(" moves");
                 for (String m : movesSoFar) cmd.append(' ').append(m);
             }
             send(cmd.toString());
-            send("go movetime " + movetimeMs);
+            send("go " + req.uci());
             // Generous margin over the requested think time: real engines occasionally overrun
-            // movetime by a bit under load, but a search that's still running at many multiples
-            // of what it was asked for is a hang, not slowness, and must not block the match.
-            long timeoutMs = Math.max(3000, movetimeMs * 10L) + 5000;
-            String line = awaitLine("bestmove", timeoutMs);
+            // by a bit under load, but a search still running at many multiples of its budget is
+            // a hang, not slowness, and must not block the match.
+            String line = awaitBestMove(req.timeoutMs());
             if (line == null) return null;
             String[] parts = line.split("\\s+");
             return parts.length >= 2 ? parts[1] : null;
+        }
+
+        /** Like {@link #awaitLine} for "bestmove", but also sniffs the last "info depth N" of the
+         *  tested engine into the owner's aggregate depth counters (gate interpretability only). */
+        private String awaitBestMove(long timeoutMs) {
+            long deadline = System.nanoTime() + timeoutMs * 1_000_000L;
+            int lastDepth = 0;
+            while (true) {
+                long remaining = (deadline - System.nanoTime()) / 1_000_000L;
+                if (remaining <= 0) return null;
+                String line;
+                try {
+                    line = lines.poll(remaining, java.util.concurrent.TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+                if (line == null || line == EOF) return null;
+                if (tested && line.startsWith("info ") && line.contains("depth ")) {
+                    int d = parseDepth(line);
+                    if (d > 0) lastDepth = d;
+                }
+                if (line.startsWith("bestmove")) {
+                    if (tested && lastDepth > 0) {
+                        owner.testedDepthSum.addAndGet(lastDepth);
+                        owner.testedMoveCount.incrementAndGet();
+                    }
+                    return line;
+                }
+            }
+        }
+
+        private static int parseDepth(String infoLine) {
+            String[] t = infoLine.split("\\s+");
+            for (int i = 0; i + 1 < t.length; i++) {
+                if (t[i].equals("depth")) {
+                    try { return Integer.parseInt(t[i + 1]); } catch (NumberFormatException e) { return 0; }
+                }
+            }
+            return 0;
         }
 
         private void send(String command) {

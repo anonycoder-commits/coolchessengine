@@ -23,6 +23,16 @@ public final class SearchLimits {
         return l;
     }
 
+    /** Clock-based control: remaining time and increment per side, in milliseconds. */
+    public static SearchLimits clock(int wtime, int btime, int winc, int binc) {
+        SearchLimits l = new SearchLimits();
+        l.wtime = wtime;
+        l.btime = btime;
+        l.winc = winc;
+        l.binc = binc;
+        return l;
+    }
+
     public boolean hasClock() {
         return wtime > 0 || btime > 0 || movetime > 0;
     }

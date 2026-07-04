@@ -20,39 +20,58 @@ import engine.eval.Evaluator;
 /**
  * Texel tuner for the handcrafted evaluation's term weights.
  *
- * <p>Method (Texas-Tal / "Texel" tuning): for a corpus of (position, game-result) pairs, the
- * eval's centipawn score is mapped to a predicted win probability via a logistic sigmoid, and
- * the mean squared error against the actual results is minimised by integer coordinate descent
- * over the tunable weights. It fits weights to what actually correlates with winning, which is
- * exactly the calibration the hand-set terms lack.
+ * <p>Method: for a corpus of (position, game-result) pairs, the eval's centipawn score is mapped
+ * to a predicted win probability via a logistic sigmoid, and the mean squared error against the
+ * actual results is minimised by integer coordinate descent over the tunable weights.
+ *
+ * <p><b>Overfitting controls (added after a first naive run overfit hard -- it minimised MSE on
+ * 100% of the data with no validation and produced sign-flipped, blown-out weights that lost a
+ * self-play gate at -90 Elo):</b>
+ * <ul>
+ *   <li><b>Train/validation split by GAME</b> ({@code -valFrac}, default 0.1): whole games (not
+ *       individual positions -- positions from one game share an outcome and would leak) are
+ *       held out. Coordinate descent optimises the TRAIN objective; VALIDATION MSE is watched
+ *       every epoch and tuning early-stops once it stops improving, keeping the best-validation
+ *       weights. This detects overfitting during tuning rather than after, via self-play.
+ *   <li><b>Per-game position cap</b> ({@code -maxPerGame}, default 10): a single long game can't
+ *       dominate; reduces the heavy within-game correlation of per-ply corpora.
+ *   <li><b>Optional L2 regularisation toward the current hand-set values</b> ({@code -lambda},
+ *       default 0): a weight only moves far from its prior if the data strongly supports it,
+ *       countering the correlated-feature compensation that flipped signs on solid terms.
+ * </ul>
  *
  * <p>Scope: only the additive term weights are tuned -- every {@code public static} non-final
- * {@code int}/{@code int[]} field of {@link Evaluator}, discovered by reflection. The PeSTO
- * material values and piece-square tables (kept {@code private static final}) are already
- * tuned and left untouched, as are structural constants (divisors, phase, masks).
+ * {@code int}/{@code int[]} field of {@link Evaluator}, discovered by reflection. Material and
+ * piece-square tables (kept {@code final}) are already tuned and untouched.
  *
- * <p>Corpus format: one position per line, {@code <FEN> <result>}. The result is recognised in
- * the common encodings ({@code 1-0}/{@code 0-1}/{@code 1/2-1/2}, {@code [1.0]}/{@code [0.5]}/
- * {@code [0.0]}, or a trailing {@code 1.0}/{@code 0.5}/{@code 0.0}), always from White's view.
- * Only the FEN's piece placement, side-to-move and halfmove clock are used. Positions should be
- * quiet (the corpus is assumed pre-filtered); this uses the raw static eval, not a qsearch.
+ * <p>Corpus: the project's {@code positions.csv} schema (columns include {@code fen},
+ * {@code white_result}, {@code game_id}); RFC4180-quoted fields handled. Uses the raw static
+ * eval and skips in-check positions ({@code -skipInCheck}); the corpus is otherwise assumed
+ * roughly quiet (canonical Texel uses a quiescence eval, a heavier future improvement).
  *
- * <p>Usage: {@code Tune -corpus <file> [-threads N] [-max N] [-maxEpochs N] [-out <file>]}.
- * Run with a large heap, e.g. {@code java -Xmx6g -cp ... engine.tools.Tune -corpus book.epd}.
- * This is an offline tool: it allocates and uses reflection freely.
+ * <p>Usage: {@code java -Xmx6g -cp ... engine.tools.Tune -corpus positions.csv -out tuned.txt
+ * [-lambda L] [-valFrac F] [-maxPerGame N] [-patience N] [-threads N] [-max N] [-maxEpochs N]}.
  */
 public final class Tune {
 
     private static final double LN10_OVER_400 = Math.log(10.0) / 400.0;
+    private static final byte TRAIN = 0, VAL = 1;
 
-    // --- flat compact corpus (no per-position Position objects; see class doc) ---
-    private long[] bb;      // N*12 piece bitboards, index(color,type) order
-    private byte[] stm;     // 0 = white to move, 1 = black
-    private short[] hmc;    // halfmove clock (clamped)
+    // --- flat compact corpus (no per-position Position objects) ---
+    private long[] bb;       // N*12 piece bitboards, index(color,type) order
+    private byte[] stm;      // 0 = white to move, 1 = black
+    private short[] hmc;     // halfmove clock (clamped)
     private double[] target; // game result from White's perspective: 1.0 / 0.5 / 0.0
+    private byte[] set;      // TRAIN or VAL, split by game so positions of a game share a set
     private int n;
 
     private int threads = Math.max(1, Runtime.getRuntime().availableProcessors());
+    private double valFrac = 0.1;
+    private int maxPerGame = 10;
+    private int patience = 3;
+    private double lambda = 0.0;
+    private boolean skipInCheck = true;
+
     private ExecutorService pool;
     private Position[] posPool;
 
@@ -71,10 +90,18 @@ public final class Tune {
     }
 
     private final List<Param> params = new ArrayList<>();
+    private int[] w0; // original (hand-set) parameter values, the L2 regularisation prior
+
+    // --- CSV columns (positions.csv schema) ---
+    private static final int COL_FEN = 0;
+    private static final int COL_GAME_ID = 5;
+    private static final int COL_WHITE_RESULT = 10;
 
     public static void main(String[] args) throws Exception {
         String corpus = null, out = null;
-        int max = Integer.MAX_VALUE, maxEpochs = 100, threadArg = -1;
+        int max = Integer.MAX_VALUE, maxEpochs = 100, threadArg = -1, maxPerGameArg = 10, patienceArg = 3;
+        double valFracArg = 0.1, lambdaArg = 0.0;
+        boolean skipInCheckArg = true;
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "-corpus": corpus = args[++i]; break;
@@ -82,33 +109,49 @@ public final class Tune {
                 case "-max": max = Integer.parseInt(args[++i]); break;
                 case "-maxEpochs": maxEpochs = Integer.parseInt(args[++i]); break;
                 case "-threads": threadArg = Integer.parseInt(args[++i]); break;
+                case "-valFrac": valFracArg = Double.parseDouble(args[++i]); break;
+                case "-maxPerGame": maxPerGameArg = Integer.parseInt(args[++i]); break;
+                case "-patience": patienceArg = Integer.parseInt(args[++i]); break;
+                case "-lambda": lambdaArg = Double.parseDouble(args[++i]); break;
+                case "-skipInCheck": skipInCheckArg = Boolean.parseBoolean(args[++i]); break;
                 default: System.err.println("Unknown arg: " + args[i]); System.exit(1); return;
             }
         }
         if (corpus == null) {
-            System.out.println("Usage: Tune -corpus <file> [-threads N] [-max N] [-maxEpochs N] [-out <file>]");
+            System.out.println("Usage: Tune -corpus <file> [-out <file>] [-lambda L] [-valFrac F]"
+                    + " [-maxPerGame N] [-patience N] [-threads N] [-max N] [-maxEpochs N] [-skipInCheck b]");
             System.exit(1);
             return;
         }
         Tune t = new Tune();
         if (threadArg > 0) t.threads = threadArg;
+        t.valFrac = valFracArg;
+        t.maxPerGame = maxPerGameArg;
+        t.patience = patienceArg;
+        t.lambda = lambdaArg;
+        t.skipInCheck = skipInCheckArg;
         t.run(corpus, max, maxEpochs, out);
     }
 
     private void run(String corpus, int max, int maxEpochs, String out) throws Exception {
         discoverParams();
-        System.out.println("Tuning " + params.size() + " parameters on " + threads + " threads.");
+        System.out.printf("Tuning %d params on %d threads (valFrac=%.2f, maxPerGame=%d, lambda=%.2e, patience=%d).%n",
+                params.size(), threads, valFrac, maxPerGame, lambda, patience);
         loadCorpus(corpus, max);
-        if (n == 0) { System.out.println("No positions loaded -- check the corpus format."); return; }
+        int trainN = 0, valN = 0;
+        for (int i = 0; i < n; i++) { if (set[i] == VAL) valN++; else trainN++; }
+        System.out.println("Split: " + trainN + " train / " + valN + " validation positions.");
+        if (trainN == 0 || valN == 0) { System.out.println("Empty train or validation set."); return; }
 
         pool = Executors.newFixedThreadPool(threads);
         posPool = new Position[threads];
         for (int i = 0; i < threads; i++) posPool[i] = Position.startpos();
         try {
             double c = fitK();
-            System.out.printf("Fitted K -> c=%.6f, initial MSE=%.6f%n", c, mse(c));
+            System.out.printf("Fitted K -> c=%.6f. Initial: train MSE=%.6f, val MSE=%.6f%n",
+                    c, mse(c, TRAIN), mse(c, VAL));
             coordinateDescent(c, maxEpochs);
-            System.out.printf("Final MSE=%.6f%n", mse(c));
+            System.out.printf("Final: train MSE=%.6f, val MSE=%.6f%n", mse(c, TRAIN), mse(c, VAL));
             report(out);
         } finally {
             pool.shutdownNow();
@@ -135,58 +178,113 @@ public final class Tune {
                     for (int i = 0; i < len; i++) params.add(new Param(f, i, f.getName() + "[" + i + "]"));
                 }
             }
+            w0 = new int[params.size()];
+            for (int i = 0; i < params.size(); i++) w0[i] = params.get(i).get();
         } catch (IllegalAccessException e) {
             throw new RuntimeException("param discovery failed", e);
         }
     }
 
-    // --- corpus loading ---
+    // --- corpus loading (CSV: ...,fen(0),...,game_id(5),...,white_result(10),...) ---
 
     private void loadCorpus(String path, int max) throws IOException {
         int lines = 0;
         try (BufferedReader r = new BufferedReader(new FileReader(path))) {
             while (r.readLine() != null && lines < max) lines++;
         }
-        bb = new long[lines * 12];
-        stm = new byte[lines];
-        hmc = new short[lines];
-        target = new double[lines];
+        int cap = Math.max(0, lines);
+        bb = new long[cap * 12];
+        stm = new byte[cap];
+        hmc = new short[cap];
+        target = new double[cap];
+        set = new byte[cap];
 
-        int skipped = 0;
+        // 1 in `valEvery` games goes to validation (whole-game, deterministic by game_id hash).
+        int valEvery = valFrac <= 0 ? Integer.MAX_VALUE : Math.max(2, (int) Math.round(1.0 / valFrac));
+
+        int skippedMalformed = 0, skippedInCheck = 0, skippedCap = 0, read = 0;
         long[] scratch = new long[12];
+        Position checkPos = Position.startpos();
+        String curGame = null;
+        int curCount = 0;
         try (BufferedReader r = new BufferedReader(new FileReader(path))) {
             String line;
-            while ((line = r.readLine()) != null && n < lines) {
-                double res = parseResult(line);
-                if (res < 0) { skipped++; continue; }
-                String cleaned = line.replace(';', ' ');
-                String[] tok = cleaned.trim().split("\\s+");
-                if (tok.length < 2) { skipped++; continue; }
+            boolean header = true;
+            while ((line = r.readLine()) != null && read < max) {
+                if (header) { header = false; continue; }
+                read++;
+                String[] col = splitCsv(line);
+                if (col.length <= COL_WHITE_RESULT) { skippedMalformed++; continue; }
+                double res = parseResult(col[COL_WHITE_RESULT]);
+                if (res < 0) { skippedMalformed++; continue; }
+
+                String gameId = col[COL_GAME_ID];
+                if (!gameId.equals(curGame)) { curGame = gameId; curCount = 0; }
+                curCount++;
+                if (curCount > maxPerGame) { skippedCap++; continue; }
+
+                String[] fen = col[COL_FEN].trim().split("\\s+");
+                if (fen.length < 2) { skippedMalformed++; continue; }
                 java.util.Arrays.fill(scratch, 0L);
-                if (!parsePlacement(tok[0], scratch)) { skipped++; continue; }
-                int side = tok[1].startsWith("b") ? Piece.BLACK : Piece.WHITE;
+                if (!parsePlacement(fen[0], scratch)) { skippedMalformed++; continue; }
+                int side = fen[1].startsWith("b") ? Piece.BLACK : Piece.WHITE;
                 int half = 0;
-                if (tok.length > 4) { try { half = Integer.parseInt(tok[4]); } catch (NumberFormatException ignore) {} }
+                if (fen.length > 4) { try { half = Integer.parseInt(fen[4]); } catch (NumberFormatException ignore) {} }
+
+                if (skipInCheck) {
+                    checkPos.loadForEval(scratch, side, 0);
+                    if (checkPos.inCheck(side)) { skippedInCheck++; continue; }
+                }
+
                 System.arraycopy(scratch, 0, bb, n * 12, 12);
                 stm[n] = (byte) side;
                 hmc[n] = (short) Math.max(0, Math.min(1000, half));
                 target[n] = res;
+                set[n] = (Math.floorMod(gameId.hashCode(), valEvery) == 0) ? VAL : TRAIN;
                 n++;
             }
         }
-        System.out.println("Loaded " + n + " positions (" + skipped + " skipped).");
+        System.out.println("Loaded " + n + " positions (" + skippedMalformed + " malformed, "
+                + skippedInCheck + " in-check, " + skippedCap + " over per-game cap).");
     }
 
-    /** White-perspective game result, or -1 if the line has no recognisable result marker. */
-    private static double parseResult(String line) {
-        if (line.contains("1/2-1/2") || line.contains("[0.5]") || line.contains(" 0.5")) return 0.5;
-        if (line.contains("1-0") || line.contains("[1.0]") || line.contains(" 1.0")) return 1.0;
-        if (line.contains("0-1") || line.contains("[0.0]") || line.contains(" 0.0")) return 0.0;
+    /** Splits one RFC4180-ish CSV line, honouring double-quoted fields that may contain commas. */
+    private static String[] splitCsv(String line) {
+        List<String> out = new ArrayList<>(20);
+        StringBuilder cur = new StringBuilder();
+        boolean inQuotes = false;
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (inQuotes) {
+                if (ch == '"') {
+                    if (i + 1 < line.length() && line.charAt(i + 1) == '"') { cur.append('"'); i++; }
+                    else inQuotes = false;
+                } else {
+                    cur.append(ch);
+                }
+            } else if (ch == '"') {
+                inQuotes = true;
+            } else if (ch == ',') {
+                out.add(cur.toString());
+                cur.setLength(0);
+            } else {
+                cur.append(ch);
+            }
+        }
+        out.add(cur.toString());
+        return out.toArray(new String[0]);
+    }
+
+    /** White-perspective game result from the white_result CSV cell, or -1 if unrecognised. */
+    private static double parseResult(String cell) {
+        String c = cell.trim();
+        if (c.equals("1") || c.equals("1.0") || c.equals("1-0")) return 1.0;
+        if (c.equals("0") || c.equals("0.0") || c.equals("0-1")) return 0.0;
+        if (c.equals("1/2") || c.equals("0.5") || c.equals("1/2-1/2")) return 0.5;
         return -1;
     }
 
-    /** Fills {@code bb} (must be pre-zeroed) from a FEN piece-placement field. Returns false on
-     *  a malformed placement (which the caller skips). */
+    /** Fills {@code bb} (pre-zeroed) from a FEN piece-placement field. False on malformed input. */
     private static boolean parsePlacement(String placement, long[] bb) {
         int rank = 7, file = 0;
         for (int i = 0; i < placement.length(); i++) {
@@ -216,30 +314,32 @@ public final class Tune {
         return (white ? Piece.WHITE : Piece.BLACK) * 6 + type;
     }
 
-    // --- error / MSE (parallel) ---
+    // --- error / MSE (parallel, per set) ---
 
-    /** Mean squared error over the corpus for logistic constant {@code c} (= K*ln10/400). */
-    private double mse(double c) {
+    /** Mean squared error over the {@code wantSet} positions for logistic constant c=K*ln10/400. */
+    private double mse(double c, byte wantSet) {
         int chunk = (n + threads - 1) / threads;
-        List<Future<Double>> futures = new ArrayList<>(threads);
+        List<Future<double[]>> futures = new ArrayList<>(threads);
         for (int t = 0; t < threads; t++) {
             final int lo = t * chunk, hi = Math.min(n, (t + 1) * chunk), tid = t;
             if (lo >= hi) break;
-            futures.add(pool.submit(() -> partialSq(lo, hi, c, posPool[tid])));
+            futures.add(pool.submit(() -> partialSq(lo, hi, c, wantSet, posPool[tid])));
         }
-        double sum = 0;
+        double sum = 0; long cnt = 0;
         try {
-            for (Future<Double> f : futures) sum += f.get();
+            for (Future<double[]> f : futures) { double[] r = f.get(); sum += r[0]; cnt += (long) r[1]; }
         } catch (Exception e) {
             throw new RuntimeException("mse computation failed", e);
         }
-        return sum / n;
+        return cnt == 0 ? 0 : sum / cnt;
     }
 
-    private double partialSq(int lo, int hi, double c, Position pos) {
+    /** Returns {sumSquaredError, count} over positions in [lo,hi) that belong to {@code wantSet}. */
+    private double[] partialSq(int lo, int hi, double c, byte wantSet, Position pos) {
         long[] scratch = new long[12];
-        double sum = 0;
+        double sum = 0; int cnt = 0;
         for (int i = lo; i < hi; i++) {
+            if (set[i] != wantSet) continue;
             System.arraycopy(bb, i * 12, scratch, 0, 12);
             pos.loadForEval(scratch, stm[i], hmc[i]);
             int e = Evaluator.evaluate(pos);
@@ -247,48 +347,93 @@ public final class Tune {
             double predicted = 1.0 / (1.0 + Math.exp(-c * whiteEval));
             double d = target[i] - predicted;
             sum += d * d;
+            cnt++;
         }
-        return sum;
+        return new double[] {sum, cnt};
     }
 
-    // --- K fitting ---
+    /** L2 penalty (mean squared deviation of current weights from their hand-set priors). */
+    private double penalty() {
+        if (lambda == 0.0) return 0.0;
+        double s = 0;
+        try {
+            for (int i = 0; i < params.size(); i++) {
+                double d = params.get(i).get() - w0[i];
+                s += d * d;
+            }
+        } catch (IllegalAccessException e) { throw new RuntimeException(e); }
+        return lambda * s / params.size();
+    }
 
-    /** Finds the logistic constant (returned pre-folded as c = K*ln10/400) minimising MSE with
-     *  the current weights, by a coarse grid then a refinement pass. */
+    /** Regularised TRAIN objective that coordinate descent minimises. */
+    private double trainObjective(double c) { return mse(c, TRAIN) + penalty(); }
+
+    // --- K fitting (on the training set) ---
+
     private double fitK() {
         double bestK = 1.0, bestErr = Double.MAX_VALUE;
         for (double k = 0.4; k <= 2.6; k += 0.1) {
-            double e = mse(k * LN10_OVER_400);
+            double e = mse(k * LN10_OVER_400, TRAIN);
             if (e < bestErr) { bestErr = e; bestK = k; }
         }
         for (double k = bestK - 0.1; k <= bestK + 0.1; k += 0.01) {
-            double e = mse(k * LN10_OVER_400);
+            double e = mse(k * LN10_OVER_400, TRAIN);
             if (e < bestErr) { bestErr = e; bestK = k; }
         }
         return bestK * LN10_OVER_400;
     }
 
-    // --- coordinate descent ---
+    // --- coordinate descent with validation-based early stopping ---
 
     private void coordinateDescent(double c, int maxEpochs) throws IllegalAccessException {
-        double best = mse(c);
+        double bestTrain = trainObjective(c);
+        double bestVal = mse(c, VAL);
+        int[] bestWeights = snapshot();
+        int sinceValImproved = 0;
+
         for (int epoch = 1; epoch <= maxEpochs; epoch++) {
             long t0 = System.nanoTime();
             int improvements = 0;
             for (Param p : params) {
                 int orig = p.get();
                 p.set(orig + 1);
-                double up = mse(c);
-                if (up < best) { best = up; improvements++; continue; }
+                double up = trainObjective(c);
+                if (up < bestTrain) { bestTrain = up; improvements++; continue; }
                 p.set(orig - 1);
-                double down = mse(c);
-                if (down < best) { best = down; improvements++; continue; }
-                p.set(orig); // neither direction helped
+                double down = trainObjective(c);
+                if (down < bestTrain) { bestTrain = down; improvements++; continue; }
+                p.set(orig);
             }
+            double valMse = mse(c, VAL);
             long ms = (System.nanoTime() - t0) / 1_000_000L;
-            System.out.printf("epoch %d: MSE=%.6f improvements=%d (%d ms)%n", epoch, best, improvements, ms);
-            if (improvements == 0) { System.out.println("Converged."); break; }
+            System.out.printf("epoch %d: train=%.6f val=%.6f improvements=%d (%d ms)%n",
+                    epoch, bestTrain, valMse, improvements, ms);
+
+            if (valMse < bestVal - 1e-9) {
+                bestVal = valMse;
+                bestWeights = snapshot();
+                sinceValImproved = 0;
+            } else {
+                sinceValImproved++;
+            }
+            if (improvements == 0) { System.out.println("Train converged."); break; }
+            if (sinceValImproved >= patience) {
+                System.out.println("Early stop: validation MSE stopped improving.");
+                break;
+            }
         }
+        restore(bestWeights); // keep the best-generalising weights, not the most train-overfit
+        System.out.printf("Best validation MSE=%.6f%n", bestVal);
+    }
+
+    private int[] snapshot() throws IllegalAccessException {
+        int[] w = new int[params.size()];
+        for (int i = 0; i < params.size(); i++) w[i] = params.get(i).get();
+        return w;
+    }
+
+    private void restore(int[] w) throws IllegalAccessException {
+        for (int i = 0; i < params.size(); i++) params.get(i).set(w[i]);
     }
 
     // --- output ---
@@ -296,7 +441,7 @@ public final class Tune {
     private void report(String out) throws Exception {
         StringBuilder sb = new StringBuilder();
         for (Param p : params) sb.append(p.name).append(" = ").append(p.get()).append('\n');
-        System.out.println("--- tuned parameters ---");
+        System.out.println("--- tuned parameters (best validation) ---");
         System.out.print(sb);
         if (out != null) {
             try (PrintWriter w = new PrintWriter(out)) { w.print(sb); }

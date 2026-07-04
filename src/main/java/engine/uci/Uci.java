@@ -37,6 +37,8 @@ public final class Uci {
     private final TranspositionTable tt = new TranspositionTable(DEFAULT_HASH_MB);
     private final Search search = new Search(new HandcraftedEvaluator(), tt);
     private int threads = 1;
+    private long moveOverheadMs = 100; // UCI "Move Overhead" option; applied to the search per 'go'
+    private int contempt = 10;         // UCI "Contempt" option; applied to the search per 'go'
     private LazySmpSearch smp; // built lazily once Threads > 1 is requested
 
     // A single persistent daemon thread (rather than a fresh Thread per 'go') so the input
@@ -74,6 +76,8 @@ public final class Uci {
                     System.out.println("option name Hash type spin default 16 min 1 max 1024");
                     System.out.println("option name Threads type spin default 1 min 1 max " + MAX_THREADS);
                     System.out.println("option name Ponder type check default false");
+                    System.out.println("option name Move Overhead type spin default 100 min 0 max 5000");
+                    System.out.println("option name Contempt type spin default 10 min -50 max 100");
                     System.out.println("uciok");
                     break;
                 case "isready":
@@ -154,7 +158,15 @@ public final class Uci {
             else if (tokens[i].equalsIgnoreCase("value")) valueIdx = i;
         }
         if (nameIdx < 0 || nameIdx + 1 >= tokens.length) return;
-        String name = tokens[nameIdx + 1];
+        // Option names may contain spaces (e.g. "Move Overhead"), so join every token between
+        // 'name' and 'value' rather than taking a single token.
+        int nameEnd = valueIdx >= 0 ? valueIdx : tokens.length;
+        StringBuilder nameBuf = new StringBuilder();
+        for (int i = nameIdx + 1; i < nameEnd; i++) {
+            if (nameBuf.length() > 0) nameBuf.append(' ');
+            nameBuf.append(tokens[i]);
+        }
+        String name = nameBuf.toString();
         if (name.equalsIgnoreCase("Hash") && valueIdx >= 0) {
             int mb = parseInt(tokens, valueIdx + 1);
             if (mb > 0) {
@@ -163,6 +175,11 @@ public final class Uci {
         } else if (name.equalsIgnoreCase("Threads") && valueIdx >= 0) {
             int n = parseInt(tokens, valueIdx + 1);
             if (n > 0) threads = Math.min(n, MAX_THREADS);
+        } else if (name.equalsIgnoreCase("Move Overhead") && valueIdx >= 0) {
+            int ms = parseInt(tokens, valueIdx + 1);
+            if (ms >= 0) moveOverheadMs = Math.min(ms, 5000);
+        } else if (name.equalsIgnoreCase("Contempt") && valueIdx >= 0) {
+            contempt = Math.max(-50, Math.min(100, parseInt(tokens, valueIdx + 1)));
         }
     }
 
@@ -221,22 +238,46 @@ public final class Uci {
             // Ponder mode is wired for the single-threaded path (the common bot configuration);
             // the flag makes think() ignore the clock until "ponderhit" rebases it. See Search.
             search.setPondering(ponder);
+            search.moveOverheadMs = moveOverheadMs;
+            search.contempt = contempt;
             best = search.think(position, limits);
             bypassPrinted = search.bypassPrinted;
             ponderMove = search.ponderMove();
         } else {
             if (smp == null || smp.threadCount() != threads) smp = new LazySmpSearch(threads, tt);
             smp.setPondering(ponder);
+            smp.setMoveOverhead(moveOverheadMs);
+            smp.setContempt(contempt);
             best = smp.think(position, limits);
             bypassPrinted = smp.bypassPrinted;
             ponderMove = smp.ponderMove();
         }
         if (bypassPrinted) return; // the search already emitted bestmove for the forced-move case
         String pv = best != 0 ? Move.toUci(best) : "0000";
-        // Offer a ponder move so a pondering GUI can search the opponent's expected reply.
+        // Offer a ponder move so a pondering GUI can search the opponent's expected reply, but
+        // only if it is actually legal in the position that arises after 'best' is played. A
+        // stale PV or TT artifact can otherwise yield an illegal ponder move, which GUIs such as
+        // lichess-bot reject outright ("Engine sent invalid ponder move"). A bare 'bestmove X'
+        // with no ponder token is always valid UCI, so we simply drop the token when in doubt.
+        if (ponderMove != 0 && best != 0 && !isLegalReply(best, ponderMove)) ponderMove = 0;
         System.out.println(ponderMove != 0
                 ? "bestmove " + pv + " ponder " + Move.toUci(ponderMove)
                 : "bestmove " + pv);
+    }
+
+    /** True if {@code reply} is a legal move in the position reached after playing {@code best}. */
+    private boolean isLegalReply(int best, int reply) {
+        position.makeMove(best);
+        try {
+            MoveList legal = new MoveList();
+            MoveGenerator.generateLegal(position, legal);
+            for (int i = 0; i < legal.size; i++) {
+                if (legal.moves[i] == reply) return true;
+            }
+            return false;
+        } finally {
+            position.unmakeMove(best);
+        }
     }
 
     private static int parseInt(String[] tokens, int idx) {

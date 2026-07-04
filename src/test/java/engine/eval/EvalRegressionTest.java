@@ -36,8 +36,16 @@ class EvalRegressionTest {
     //   mop-up era:                {15, 88, -13, 83, 130, 16, -218, -310, 15, -911, 1167}
     //   with rook-behind-passer ON (useRookBehindPasser, default off after its referee gate
     //   came back neutral-negative): positions 4/7 become 88 and -208.
+    //   useOutsidePasser went default ON (2026-07-04, gated at 51.2%/600 games, kept for fixing
+    //   a targeted loss -- see Evaluator.OUTSIDE_PASSER_EG): positions 7/8 (indices 6/7) change
+    //   from -218/-310 to -214/-320 -- both have a passer >= OUTSIDE_KING_DIST files from the
+    //   enemy king. All other positions are unaffected by this flip.
+    //   usePawnMajority ALSO went default ON (2026-07-04, gated at 51.7%/600 games vs the
+    //   outside-passer-on baseline): positions 7/8 (indices 6/7) shift further to -210/-344.
+    //   Re-verify both changed FENs fresh (not from memory) after touching either toggle --
+    //   an earlier stale-Gradle-cache false pass on this exact test taught that lesson.
     private static final int[] EXPECTED = {
-        15, 96, -7, 83, 130, 16, -218, -310, 15, -911, 1167,
+        15, 96, -7, 83, 130, 16, -210, -344, 15, -911, 1167,
     };
 
     @Test

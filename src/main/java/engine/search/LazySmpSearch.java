@@ -52,6 +52,8 @@ public final class LazySmpSearch {
     // match the single-threaded Search, whose tables also survive from move to move.
     private Search[] workers;
     private volatile boolean pendingPonder; // armed via setPondering, applied to the master
+    private volatile long moveOverheadMs = 100; // applied to the master worker each think()
+    private volatile int contempt = 10;         // applied to EVERY worker each think()
 
     public int bestMove;
     public int bestScore;
@@ -87,6 +89,12 @@ public final class LazySmpSearch {
     /** Arms ponder mode for the next {@link #think} (only the master worker is timed). */
     public void setPondering(boolean p) { pendingPonder = p; }
 
+    /** Sets the move-overhead budget applied to the (timed) master worker on the next {@link #think}. */
+    public void setMoveOverhead(long ms) { moveOverheadMs = ms; }
+
+    /** Sets the contempt (draw aversion, cp) applied to every worker on the next {@link #think}. */
+    public void setContempt(int cp) { contempt = cp; }
+
     /** UCI "ponderhit": rebase the master worker's clock and let normal timing take over. */
     public void ponderHit() { if (workers != null) workers[0].ponderHit(); }
 
@@ -110,6 +118,8 @@ public final class LazySmpSearch {
             }
         }
         workers[0].setPondering(pendingPonder); // only the master is timed, so only it ponders
+        workers[0].moveOverheadMs = moveOverheadMs; // the master owns the clock; keep it in sync
+        for (Search worker : workers) worker.contempt = contempt; // every worker scores draws alike
         List<Future<Void>> futures = new ArrayList<>(threadCount);
         try {
             for (int id = 0; id < threadCount; id++) {
