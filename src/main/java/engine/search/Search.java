@@ -193,6 +193,15 @@ public final class Search {
     private static final double ADAPTIVE_TREND_MAX = 1.30;       // falling eval buys time
     private static final double ADAPTIVE_FACTOR_MIN = 0.50;      // clamp the stability*trend product
     private static final double ADAPTIVE_FACTOR_MAX = 2.00;
+    // Node-effort factor (the third adaptive signal, standard in modern engines): the fraction
+    // of ALL search nodes this think() spent under the current best root move. Near 1.0 the
+    // move dominates the tree (settled -- stop sooner); spread-out effort means the root is
+    // still genuinely contested (spend longer). Folded into the stability*trend product above,
+    // inside the same [FACTOR_MIN, FACTOR_MAX] safety clamp.
+    private static final double ADAPTIVE_EFFORT_BASE = 1.60;  // effort = clamp(BASE - SLOPE*bestFrac, ...)
+    private static final double ADAPTIVE_EFFORT_SLOPE = 1.10; // bestFrac 1.0 -> 0.50 raw -> clamped 0.60
+    private static final double ADAPTIVE_EFFORT_MIN = 0.60;
+    private static final double ADAPTIVE_EFFORT_MAX = 1.50;
     // Mate-hunt band: a crushing but not-yet-mate score (>= this) means a forced mate is very
     // likely just past the horizon, so the decisive-score acceleration above (which would bank
     // the clock after only 2 stable iterations) is suppressed and the full soft budget is spent
@@ -378,6 +387,14 @@ public final class Search {
     // Search state
     private long nodes;
     private long startNanos;
+    // Per-root-move node-effort tally (adaptive time only; see ADAPTIVE_EFFORT_*). Keyed by the
+    // move integer -- NOT by move-list index, because selectNext() swap-reorders the root move
+    // array in place during iteration. Accumulated across the whole think() call (every depth
+    // iteration and aspiration re-search); linear scan is fine at root branching factors.
+    // MoveList grows past 256 in theory, but 256 exceeds the legal-move maximum (218).
+    private final int[] rootEffortMoves = new int[256];
+    private final long[] rootEffortNodes = new long[256];
+    private int rootEffortCount;
     // Package-private (rather than private) so a test can drive computeTimeLimits() directly
     // and assert on the resulting bounds without running a full search -- see SeeTest's
     // similar rationale for see() being package-private instead of private.
@@ -550,6 +567,7 @@ public final class Search {
     public int think(Position pos, SearchLimits limits) {
         bypassPrinted = false;
         nodes = 0;
+        rootEffortCount = 0; // per-think() node-effort tally (see rootEffortMoves)
         stop = false;
         softStopArmed = false;
         softStopFiredMidIteration = false;
@@ -790,13 +808,20 @@ public final class Search {
                 // Adaptive continuous exit: instead of a single hard stability threshold, scale
                 // the optimum-time target down as the root move gets more stable and up as the
                 // eval falls (a dropping score means the position is turning against us and wants
-                // more thought). stopTarget = optimum * stability * trend, clamped.
+                // more thought). stopTarget = optimum * stability * trend * effort, clamped.
                 int stab = Math.min(stableIterationsCount, ADAPTIVE_STABILITY_CAP);
                 double stabilityFactor = ADAPTIVE_STABILITY_BASE - ADAPTIVE_STABILITY_SLOPE * stab;
                 double trend = 1.0 + (prevIterScore - committedScore) * ADAPTIVE_TREND_SLOPE;
                 trend = Math.max(ADAPTIVE_TREND_MIN, Math.min(ADAPTIVE_TREND_MAX, trend));
+                // Node-effort factor: the share of the whole search spent under the committed
+                // best move (see addRootEffort). Neutral (1.0) until a tally exists.
+                double effort = 1.0;
+                if (committedMove != 0 && nodes > 0) {
+                    long bestNodes = rootEffortFor(committedMove);
+                    if (bestNodes > 0) effort = effortFactor(bestNodes / (double) nodes);
+                }
                 double factor = Math.max(ADAPTIVE_FACTOR_MIN,
-                        Math.min(ADAPTIVE_FACTOR_MAX, stabilityFactor * trend));
+                        Math.min(ADAPTIVE_FACTOR_MAX, stabilityFactor * trend * effort));
                 long stopTarget = (long) (optimumTimeMs * factor);
                 int minStable = committedScore > SOFT_BOUND_DECISIVE_SCORE_CP
                         ? SOFT_BOUND_STABLE_ITERATIONS_DECISIVE
@@ -810,6 +835,7 @@ public final class Search {
                                 + " move=" + Move.toUci(committedMove)
                                 + " stable=" + stableIterationsCount
                                 + " factor=" + String.format("%.2f", factor)
+                                + " effort=" + String.format("%.2f", effort)
                                 + " elapsedMs=" + elapsedMs()
                                 + " stopTargetMs=" + stopTarget);
                     }
@@ -1297,6 +1323,11 @@ public final class Search {
 
             // Continuation-history key of this move (mover is still on `from` pre-make).
             int movedPieceTo = pos.pieceAt(Move.from(move)) * 64 + Move.to(move);
+            // Node-effort tally (adaptive time only, root only): snapshot the node counter so
+            // the delta after unmakeMove credits this move's whole subtree. Root moves are
+            // never pruned (all pruning above needs ply > 0 or !isPvNode; the root is PV), so
+            // the tally is complete. Guarded so the shipped OFF default does zero bookkeeping.
+            long effortNodesBefore = (useAdaptiveTime && ply == 0) ? nodes : -1;
             pos.makeMove(move);
             moveStack[ply] = move; // the move that leads to the child node at ply+1
             pieceToStack[ply] = movedPieceTo;
@@ -1441,6 +1472,9 @@ public final class Search {
                 }
             }
             pos.unmakeMove(move);
+            // Credit this move's subtree nodes even on an aborted search (before the stopped()
+            // return below) -- the nodes were genuinely spent under it either way.
+            if (effortNodesBefore >= 0) addRootEffort(move, nodes - effortNodesBefore);
             if (stopped()) return 0;
 
             if (ply == 0) updateRootMargin(score);
@@ -1865,6 +1899,45 @@ public final class Search {
             scores[i] = scores[best];
             scores[best] = ts;
         }
+    }
+
+    /** Adds {@code delta} nodes to {@code move}'s whole-search effort tally (ply 0 only). */
+    private void addRootEffort(int move, long delta) {
+        for (int i = 0; i < rootEffortCount; i++) {
+            if (rootEffortMoves[i] == move) {
+                rootEffortNodes[i] += delta;
+                return;
+            }
+        }
+        if (rootEffortCount < rootEffortMoves.length) {
+            rootEffortMoves[rootEffortCount] = move;
+            rootEffortNodes[rootEffortCount] = delta;
+            rootEffortCount++;
+        }
+    }
+
+    /** Nodes spent under {@code move} at the root this think() call, or 0 if never searched.
+     *  Package-private for tests (same rationale as computeTimeLimits/see). */
+    long rootEffortFor(int move) {
+        for (int i = 0; i < rootEffortCount; i++) {
+            if (rootEffortMoves[i] == move) return rootEffortNodes[i];
+        }
+        return 0;
+    }
+
+    /** Sum of all root-move effort tallies this think() call. Package-private for tests. */
+    long rootEffortTotal() {
+        long sum = 0;
+        for (int i = 0; i < rootEffortCount; i++) sum += rootEffortNodes[i];
+        return sum;
+    }
+
+    /** The node-effort time factor for a best-move node fraction in [0,1]: high concentration
+     *  on one move means the root is settled (factor < 1, stop sooner); spread-out effort means
+     *  it is contested (factor > 1, spend longer). Package-private static for direct unit tests. */
+    static double effortFactor(double bestFrac) {
+        double f = ADAPTIVE_EFFORT_BASE - ADAPTIVE_EFFORT_SLOPE * bestFrac;
+        return Math.max(ADAPTIVE_EFFORT_MIN, Math.min(ADAPTIVE_EFFORT_MAX, f));
     }
 
     /** Tracks the best and second-best root-move scores seen this iteration (ply 0 only). */

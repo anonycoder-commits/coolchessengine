@@ -74,4 +74,42 @@ class TimeManagementTest {
         assertTrue(search.optimumTimeMs > 0);
         assertTrue(search.hardLimitMs >= search.softLimitMs);
     }
+
+    // --- node-effort tally (adaptive time's third factor; see ADAPTIVE_EFFORT_*) ---
+
+    @Test
+    void effortFactorMapsBestFractionOntoTheClampedRange() {
+        // Spec's own reference points: full concentration clamps low (stop sooner), near-zero
+        // concentration clamps high (spend longer), an even split lands in between.
+        assertEquals(0.60, Search.effortFactor(1.0), 1e-9);  // 1.60 - 1.10 -> 0.50, clamped up
+        assertEquals(1.50, Search.effortFactor(0.0), 1e-9);  // 1.60 raw, clamped down
+        assertEquals(1.05, Search.effortFactor(0.5), 1e-9);  // 1.60 - 0.55, inside the clamp
+    }
+
+    @Test
+    void rootEffortTallyTracksNodesOnlyWhenAdaptiveTimeIsOn() {
+        engine.board.Position pos = engine.board.Position.fromFen(
+                "2rr3k/pp3pp1/1nnqbN1p/3pN3/2pP4/2P3Q1/PPB4P/R4RK1 w - - 0 1"); // WAC.001 (Bench set)
+
+        // OFF (shipped default): the bookkeeping must never run.
+        Search off = new Search();
+        off.printInfo = false;
+        off.think(pos, SearchLimits.depth(6));
+        assertEquals(0L, off.rootEffortTotal(),
+                "with useAdaptiveTime off, no effort tally may ever be recorded");
+
+        // ON: the best move's tally is populated and the totals stay within the node count.
+        Search on = new Search();
+        on.printInfo = false;
+        on.useAdaptiveTime = true;
+        int best = on.think(engine.board.Position.fromFen(
+                "2rr3k/pp3pp1/1nnqbN1p/3pN3/2pP4/2P3Q1/PPB4P/R4RK1 w - - 0 1"), SearchLimits.depth(6));
+        assertTrue(best != 0, "search must return a move");
+        assertTrue(on.rootEffortFor(best) > 0,
+                "the returned best move must have accumulated root effort");
+        assertTrue(on.rootEffortFor(best) <= on.nodes(),
+                "one move's effort cannot exceed the whole search's node count");
+        assertTrue(on.rootEffortTotal() <= on.nodes(),
+                "summed root effort cannot exceed the whole search's node count");
+    }
 }
