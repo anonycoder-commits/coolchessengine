@@ -21,8 +21,11 @@ public final class Evaluator {
     private Evaluator() {}
 
     // Midgame/endgame material values indexed by piece TYPE (PAWN..KING).
-    private static final int[] MG_VALUE = {82, 337, 365, 477, 1025, 0};
-    private static final int[] EG_VALUE = {94, 281, 297, 512, 936, 0};
+    // Non-final so engine.tools.Tune can discover and fit them (the rofchade result on the
+    // zurichess corpus came specifically from tuning material + PST, not the auxiliary terms).
+    // King entries are a flat direction (one king each side cancels in the color difference).
+    public static int[] MG_VALUE = {82, 337, 365, 477, 1025, 0};
+    public static int[] EG_VALUE = {94, 281, 297, 512, 936, 0};
 
     // Tempo: a small flat bonus for the side to move, reflecting the standing initiative of
     // having the move. Beyond a genuine (if small) positional truth, it damps the odd/even
@@ -279,8 +282,11 @@ public final class Evaluator {
     private static final int PHASE_MAX = 24;
 
     // Piece-square tables, [type][square], written a8-first (see static init for orientation).
-    private static final int[][] MG_PST = new int[6][];
-    private static final int[][] EG_PST = new int[6][];
+    // Non-final so engine.tools.Tune can discover and fit them (see MG_VALUE note above).
+    // Both colors read the same table (black mirrored via sq^56), so per-square tuning
+    // preserves color symmetry structurally.
+    public static int[][] MG_PST = new int[6][];
+    public static int[][] EG_PST = new int[6][];
 
     // Precomputed file / adjacent-file / passed-pawn masks.
     private static final long[] FILES = new long[8];

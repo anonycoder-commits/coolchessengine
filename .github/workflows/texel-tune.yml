@@ -1,0 +1,108 @@
+name: Texel tune sweep
+
+# Runs engine.tools.Tune once per lambda value, each on its own GitHub-hosted runner, so a
+# multi-lambda regularization sweep finishes in the wall time of the slowest single run
+# instead of the sum of all of them (locally the sweep runs sequentially and monopolizes the
+# machine for hours). Each job independently downloads the Zurichess quiet-labeled corpus
+# (BSD-licensed, see tools/tune_data/zurichess/LICENSE locally), converts it with the repo's
+# converter script, and tunes; a final job commits every tuned_L*.txt plus full per-run logs
+# to a fresh tune-results-<run_id> branch, which is fetchable locally for the sign-flip
+# review -- no artifact-download dance needed.
+#
+# Manual only (workflow_dispatch), same reasoning as self-play-gate.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tune_ref:
+        description: "Git ref whose Evaluator/Tune to build and tune (branch, tag, or commit SHA)"
+        required: true
+        default: "main"
+      lambdas:
+        description: "JSON array of lambda values, one parallel runner each"
+        required: true
+        default: '["0.00002", "0.0001", "0.0005", "0.002", "0.008"]'
+      extra_args:
+        description: "Extra Tune args appended to every run, e.g. -maxPerGame 10 or -patience 5"
+        required: false
+        default: ""
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        lambda: ${{ fromJSON(inputs.lambdas) }}
+    steps:
+      - name: Checkout tune ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tune_ref }}
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Build
+        run: chmod +x gradlew && ./gradlew compileJava -q
+      - name: Download and convert the Zurichess corpus
+        run: |
+          set -euo pipefail
+          curl -sL --retry 3 "https://bitbucket.org/zurichess/tuner/downloads/tuner.7z" -o tuner.7z
+          command -v 7z >/dev/null || sudo apt-get install -y p7zip-full
+          7z x tuner.7z quiet-labeled.epd -y
+          python3 tools/tune_data/convert_zurichess_epd.py --in quiet-labeled.epd --out positions_zurichess.csv
+          LINES=$(wc -l < positions_zurichess.csv)
+          echo "Corpus rows (incl. header): $LINES"
+          if [ "$LINES" -lt 700000 ]; then
+            echo "::error::Corpus conversion produced only $LINES rows -- expected ~725k"
+            exit 1
+          fi
+      - name: Tune lambda ${{ matrix.lambda }}
+        run: |
+          set -euo pipefail
+          java -Xmx6g -cp build/classes/java/main engine.tools.Tune \
+            -corpus positions_zurichess.csv \
+            -out "tuned_L${{ matrix.lambda }}.txt" \
+            -valFrac 0.1 -patience 3 -lambda ${{ matrix.lambda }} \
+            ${{ inputs.extra_args }} | tee "tune_L${{ matrix.lambda }}.log"
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuned-${{ matrix.lambda }}
+          path: |
+            tuned_L${{ matrix.lambda }}.txt
+            tune_L${{ matrix.lambda }}.log
+          retention-days: 7
+
+  collect:
+    needs: tune
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout tune ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tune_ref }}
+      - name: Download all tuned outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tuned-*
+          path: results
+          merge-multiple: true
+      - name: Commit results to a fresh branch
+        run: |
+          set -euo pipefail
+          mkdir -p tools/tune_data/gh_results
+          cp results/* tools/tune_data/gh_results/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BR="tune-results-${{ github.run_id }}"
+          git checkout -b "$BR"
+          git add tools/tune_data/gh_results
+          git commit -m "Texel tune sweep results (run ${{ github.run_id }}, lambdas ${{ inputs.lambdas }})"
+          git push origin "$BR"
+          echo "Results pushed to branch $BR -- fetch it locally to review."

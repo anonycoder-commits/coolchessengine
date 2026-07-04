@@ -40,9 +40,10 @@ import engine.eval.Evaluator;
  *       countering the correlated-feature compensation that flipped signs on solid terms.
  * </ul>
  *
- * <p>Scope: only the additive term weights are tuned -- every {@code public static} non-final
- * {@code int}/{@code int[]} field of {@link Evaluator}, discovered by reflection. Material and
- * piece-square tables (kept {@code final}) are already tuned and untouched.
+ * <p>Scope: every {@code public static} non-final {@code int}/{@code int[]}/{@code int[][]}
+ * field of {@link Evaluator}, discovered by reflection -- the additive term weights plus
+ * material values and piece-square tables (made non-final for exactly this purpose; tuning
+ * material+PST on the zurichess corpus is the configuration with a published Elo track record).
  *
  * <p>Corpus: the project's {@code positions.csv} schema (columns include {@code fen},
  * {@code white_result}, {@code game_id}); RFC4180-quoted fields handled. Uses the raw static
@@ -75,17 +76,21 @@ public final class Tune {
     private ExecutorService pool;
     private Position[] posPool;
 
-    // --- tunable parameter handles (a scalar field, or one element of an int[] field) ---
+    // --- tunable parameter handles (a scalar field, or one element of an int[] / int[][] field) ---
     private static final class Param {
         final Field field;
-        final int index; // -1 => scalar field; else element of an int[] field
+        final int row;   // -1 => not a 2D field; else first index of an int[][] field
+        final int index; // -1 => scalar field; else element index within the (row's) int[]
         final String name;
-        Param(Field f, int idx, String n) { field = f; index = idx; name = n; }
+        Param(Field f, int row, int idx, String n) { field = f; this.row = row; index = idx; name = n; }
         int get() throws IllegalAccessException {
+            if (row >= 0) return ((int[][]) field.get(null))[row][index];
             return index < 0 ? field.getInt(null) : ((int[]) field.get(null))[index];
         }
         void set(int v) throws IllegalAccessException {
-            if (index < 0) field.setInt(null, v); else ((int[]) field.get(null))[index] = v;
+            if (row >= 0) ((int[][]) field.get(null))[row][index] = v;
+            else if (index < 0) field.setInt(null, v);
+            else ((int[]) field.get(null))[index] = v;
         }
     }
 
@@ -165,17 +170,25 @@ public final class Tune {
         for (Field f : Evaluator.class.getDeclaredFields()) {
             int m = f.getModifiers();
             if (!Modifier.isStatic(m) || !Modifier.isPublic(m) || Modifier.isFinal(m)) continue;
-            if (f.getType() == int.class || f.getType() == int[].class) fields.add(f);
+            if (f.getType() == int.class || f.getType() == int[].class
+                    || f.getType() == int[][].class) fields.add(f);
         }
         fields.sort(Comparator.comparing(Field::getName));
         try {
             for (Field f : fields) {
                 f.setAccessible(true);
                 if (f.getType() == int.class) {
-                    params.add(new Param(f, -1, f.getName()));
-                } else {
+                    params.add(new Param(f, -1, -1, f.getName()));
+                } else if (f.getType() == int[].class) {
                     int len = ((int[]) f.get(null)).length;
-                    for (int i = 0; i < len; i++) params.add(new Param(f, i, f.getName() + "[" + i + "]"));
+                    for (int i = 0; i < len; i++) params.add(new Param(f, -1, i, f.getName() + "[" + i + "]"));
+                } else {
+                    int[][] rows = (int[][]) f.get(null);
+                    for (int r = 0; r < rows.length; r++) {
+                        for (int i = 0; i < rows[r].length; i++) {
+                            params.add(new Param(f, r, i, f.getName() + "[" + r + "][" + i + "]"));
+                        }
+                    }
                 }
             }
             w0 = new int[params.size()];
