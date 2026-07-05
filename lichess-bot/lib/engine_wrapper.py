@@ -95,6 +95,13 @@ class EngineWrapper:
         """
         self.engine: chess.engine.SimpleEngine | FillerEngine
         self.scores: list[chess.engine.PovScore] = []
+        # PERSONALITY FEATURE: the score of the last completed move search, or None when the
+        # last move did not come from a search (book/egtb/online move) or the search result
+        # carried no score (e.g. a ponderhit early exit whose bestmove had no final info line).
+        # Unlike self.scores -- which pads missing scores with a Mate(1) sentinel that
+        # offer_draw_or_resign() depends on -- this is safe for the chat taunt to read.
+        # Homemade (MinimalEngine) engines never set it, so they simply never taunt.
+        self.last_move_search_score: chess.engine.PovScore | None = None
         self.draw_or_resign = draw_or_resign
         self.go_commands = Configuration(cast(GO_COMMANDS_TYPE, options.pop("go_commands", {})) or {})
         self.move_commentary: list[InfoStrDict] = []
@@ -155,6 +162,10 @@ class EngineWrapper:
         :param min_time: Minimum time to spend, in seconds.
         :return: The move to play.
         """
+        # Reset up front so book/egtb/online moves (which skip search()) can never leave a
+        # stale score behind for the taunt check. search() repopulates it when it runs.
+        self.last_move_search_score = None
+
         polyglot_cfg = engine_cfg.polyglot
         online_moves_cfg = engine_cfg.online_moves
         draw_or_resign_cfg = engine_cfg.draw_or_resign
@@ -271,6 +282,9 @@ class EngineWrapper:
         # Use null_score to have no effect on draw/resign decisions
         null_score = chess.engine.PovScore(chess.engine.Mate(1), board.turn)
         self.scores.append(result.info.get("score", null_score))
+        # The real (unpadded) score for the taunt check: None when this search produced no
+        # score, so a missing score can never read as the Mate(1) sentinel (~+100000cp).
+        self.last_move_search_score = result.info.get("score")
         return self.offer_draw_or_resign(result, board)
 
     def comment_index(self, move_stack_index: int) -> int:

@@ -28,12 +28,20 @@ TAUNTS = [
 
 
 def is_winning_big(engine: EngineWrapper, board: chess.Board) -> bool:
-    """Return True if the engine's most recent score shows a large lead for our side."""
+    """Return True if the engine's most recent score shows a large lead for our side.
+
+    Reads engine.last_move_search_score, NOT engine.scores[-1]: the scores list pads
+    searches that returned no score (e.g. ponderhit early exits) with a Mate(1) sentinel
+    for the draw/resign logic, which would read here as a huge lead and fire the taunt
+    at random moments (observed live at evals of +0.5). It is also stale after book/egtb
+    moves, which append nothing to the scores list.
+    """
     if board.fullmove_number < MIN_MOVE_NUMBER_FOR_TAUNT:
         return False
-    if not engine.scores:
+    score = engine.last_move_search_score
+    if score is None:
         return False
-    cp = engine.scores[-1].relative.score(mate_score=100000)
+    cp = score.relative.score(mate_score=100000)
     if cp is None:
         return False
     return cp >= TAUNT_SCORE_THRESHOLD_CP

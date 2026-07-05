@@ -386,6 +386,17 @@ public final class Search {
 
     // Search state
     private long nodes;
+    // Cross-thread-readable snapshot of `nodes`. `nodes` itself is a plain long (a volatile
+    // write per node would cost real speed, and the JLS permits torn reads of non-volatile
+    // longs), so workers publish it here every checkTime() interval (2048 nodes) and once at
+    // the end of think(). Only used for SMP info-line aggregation -- see extraNodes.
+    private volatile long publishedNodes;
+    // When set (by LazySmpSearch, on the master worker only), printInfo() adds this to its
+    // own node count so UCI 'info nodes/nps' reports the whole SMP effort, not just the
+    // master's ~1/threads share (observed live: "750 Knps" logged at Threads=4 while the
+    // true aggregate was several times that). Null in single-threaded use; nodes() itself
+    // stays master-only (its one caller, Bench, is single-threaded by design).
+    public java.util.function.LongSupplier extraNodes;
     private long startNanos;
     // Per-root-move node-effort tally (adaptive time only; see ADAPTIVE_EFFORT_*). Keyed by the
     // move integer -- NOT by move-list index, because selectNext() swap-reorders the root move
@@ -563,6 +574,16 @@ public final class Search {
     public void requestStop() { stop = true; }
     public long nodes() { return nodes; }
 
+    /** Snapshot of this worker's node count, safely readable from another thread (updated
+     *  every checkTime() interval and at the end of think(); see publishedNodes). */
+    long publishedNodes() { return publishedNodes; }
+
+    /** Zeroes the published snapshot. LazySmpSearch calls this on every helper from the
+     *  manager thread before submitting a new think(): workers persist across moves, so
+     *  without it the master's first info line of a new move would include the helpers'
+     *  counts from the previous move. */
+    void resetPublishedNodes() { publishedNodes = 0; }
+
     /** Wires this worker to an externally-owned stop flag (see {@link LazySmpSearch}). */
     void setSharedStop(AtomicBoolean sharedStop) { this.sharedStop = sharedStop; }
 
@@ -579,6 +600,7 @@ public final class Search {
     public int think(Position pos, SearchLimits limits) {
         bypassPrinted = false;
         nodes = 0;
+        publishedNodes = 0;
         rootEffortCount = 0; // per-think() node-effort tally (see rootEffortMoves)
         stop = false;
         softStopArmed = false;
@@ -944,6 +966,7 @@ public final class Search {
             if (legal.size > 0) committedMove = legal.moves[0];
         }
 
+        publishedNodes = nodes; // final publish so post-search aggregate reads are exact
         bestMove = committedMove;
         bestScore = committedScore;
         bestPonderMove = committedPonderMove;
@@ -2205,6 +2228,10 @@ public final class Search {
     }
 
     private void checkTime() {
+        // Publish BEFORE the early return below: SMP helpers run with infinite limits
+        // (useTime false), so this is their only periodic publish point -- placing it any
+        // later would leave their published counts frozen at 0 for the whole search.
+        publishedNodes = nodes;
         if (pondering || !useTime || currentDepth < 2) return;
         long elapsed = elapsedMs();
         if (elapsed >= hardLimitMs) {
@@ -2233,10 +2260,12 @@ public final class Search {
 
     private void printInfo(int depth, int score) {
         long ms = elapsedMs();
-        long nps = ms > 0 ? nodes * 1000L / ms : nodes;
+        // Aggregate SMP total: helpers' published counts (see extraNodes) on top of our own.
+        long totalNodes = nodes + (extraNodes != null ? extraNodes.getAsLong() : 0L);
+        long nps = ms > 0 ? totalNodes * 1000L / ms : totalNodes;
         System.out.println("info depth " + depth
                 + " score " + formatScore(score)
-                + " nodes " + nodes
+                + " nodes " + totalNodes
                 + " time " + ms
                 + " nps " + nps
                 + " pv " + pvString());

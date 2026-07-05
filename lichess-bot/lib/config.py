@@ -440,7 +440,9 @@ def load_config(config_file: str) -> Configuration:
     :param config_file: The filename of the config (usually `config.yml`).
     :return: A `Configuration` object containing the config.
     """
-    with open(config_file) as stream:
+    # Explicit UTF-8: without it Windows decodes as cp1252, mangling any non-ASCII config
+    # text (observed live: the em-dash in a greeting reached lichess chat as mojibake).
+    with open(config_file, encoding="utf-8") as stream:
         try:
             CONFIG = yaml.safe_load(stream)
         except Exception:

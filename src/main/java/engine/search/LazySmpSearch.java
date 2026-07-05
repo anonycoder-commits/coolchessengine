@@ -116,7 +116,21 @@ public final class LazySmpSearch {
                 worker.setSharedStop(sharedStop);
                 workers[id] = worker;
             }
+            // The master's info lines report the aggregate SMP node count/nps: its own nodes
+            // plus every helper's published snapshot (refreshed each checkTime() interval).
+            // Without this, 'info nodes/nps' under-reports by ~threadCount x.
+            final Search[] all = workers;
+            workers[0].extraNodes = () -> {
+                long sum = 0;
+                for (int i = 1; i < all.length; i++) sum += all[i].publishedNodes();
+                return sum;
+            };
         }
+        // Zero helper snapshots from this (manager) thread before the new search starts:
+        // workers persist across think() calls, and a helper resets its own counter only
+        // once its task is running -- the master's first info line would otherwise include
+        // the helpers' counts from the PREVIOUS move.
+        for (int id = 1; id < threadCount; id++) workers[id].resetPublishedNodes();
         workers[0].setPondering(pendingPonder); // only the master is timed, so only it ponders
         workers[0].moveOverheadMs = moveOverheadMs; // the master owns the clock; keep it in sync
         for (Search worker : workers) worker.contempt = contempt; // every worker scores draws alike
