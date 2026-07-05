@@ -90,8 +90,30 @@ step, or transpose bullet's native dump into it.
 harness to later confirm the reference matches **bullet's own** output (the final authority on
 the `^56`/concat convention).
 
-### Deferred to Phase 2 (needs a real trained net)
+## Phase 2 — engine integration + gate
 
-Bundling weights in `src/main/resources/nnue/`, the `getResourceAsStream` default load, the
-UCI `EvalFile`/`UseNNUE` option, per-worker instantiation in `LazySmpSearch`, and the
-NNUE-vs-HCE self-play gate.
+**Integration wiring (done).** Eval is runtime-selectable and OFF by default, so the shipping
+engine and bench signature (`745650`) are unchanged unless explicitly enabled:
+
+- UCI options `UseNNUE` (check, default false) and `EvalFile` (string path).
+- `Uci` loads the net from `EvalFile`, else a bundled `/nnue/default.nnue` resource if present;
+  any load failure falls back to the handcrafted eval (the engine never refuses to move).
+- `LazySmpSearch.setEvaluatorFactory` gives each worker its own `NnueEvaluator` over one shared
+  read-only `Network`.
+- `NnueSearchIntegrationTest` proves single-threaded and SMP search with NNUE produce legal moves.
+
+Try it: `setoption name EvalFile value path/to/net.bin` then `setoption name UseNNUE value true`.
+
+**Still needs a real trained net (your GPU box):**
+- Bundle the chosen net at `src/main/resources/nnue/default.nnue` (auto-ships via
+  `copyToLichessBot`) OR pass it by `EvalFile` — the loader handles both.
+- Cross-check `NnueProbe <net>` vs `nnue_ref.py --eval <net>` vs **bullet's own** eval on a few
+  FENs — the final confirmation of the `^56`/concat convention on real weights.
+- Dispatch `self-play-gate.yml`: candidate = `UseNNUE=true`, baseline = default HCE. Adopt at
+  ≥51.5%. A weak/failing gate with a sane net points at an inference bug, not the net — the
+  cross-check above is what rules that out first.
+
+## Phase 3 (after the gate passes)
+
+Incremental "efficiently-updatable" accumulator (feature deltas at Position's mutation choke
+points), then SIMD if nps needs it. See `nnueroadmap.md`.
