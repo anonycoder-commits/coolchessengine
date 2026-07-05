@@ -34,6 +34,9 @@ lichess-bot/.venv/
 *.nnue
 *.log
 
+# --- NNUE derived data / weights (large, regenerable; keep the scripts, not the outputs) ---
+tools/nnue/data/
+
 # --- OMC runtime/session state (churns on every tool call, not source) ---
 .omc/state/
 .omc/sessions/
