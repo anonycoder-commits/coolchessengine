@@ -24,8 +24,8 @@ public final class Evaluator {
     // Non-final so engine.tools.Tune can discover and fit them (the rofchade result on the
     // zurichess corpus came specifically from tuning material + PST, not the auxiliary terms).
     // King entries are a flat direction (one king each side cancels in the color difference).
-    public static int[] MG_VALUE = {82, 337, 365, 477, 1025, 0};
-    public static int[] EG_VALUE = {94, 281, 297, 512, 936, 0};
+    public static int[] MG_VALUE = {81, 339, 366, 478, 1025, 0};
+    public static int[] EG_VALUE = {90, 282, 299, 517, 937, 0};
 
     // Tempo: a small flat bonus for the side to move, reflecting the standing initiative of
     // having the move. Beyond a genuine (if small) positional truth, it damps the odd/even
@@ -33,7 +33,7 @@ public final class Evaluator {
     // destabilizes node counts between iterations. Added to the side-to-move-relative score,
     // so it is deliberately NOT color-symmetric the way the board terms are (see
     // EvalSymmetryTest, which subtracts it out before checking antisymmetry).
-    public static int TEMPO = 15;
+    public static int TEMPO = 23;
 
     // --- pawn structure / king safety / mobility weights ---
     // Every term below is a genuine MG/EG *pair* (not a single flat value split by eye) --
@@ -45,15 +45,15 @@ public final class Evaluator {
     // phase blend, as this evaluator previously did, meant every one of them applied at full
     // strength in a bare king-and-pawn endgame exactly as if the queens were still on the
     // board, which is the classic "endgame bleeding" failure mode this refactor fixes.
-    public static int DOUBLED_MG = 12;
-    public static int DOUBLED_EG = 20;
-    public static int ISOLATED_MG = 14;
-    public static int ISOLATED_EG = 10;
+    public static int DOUBLED_MG = 9;
+    public static int DOUBLED_EG = 19;
+    public static int ISOLATED_MG = 9;
+    public static int ISOLATED_EG = 6;
     // Passed-pawn bonus indexed by the pawn's rank relative to its own side (0..7). EG ramps
     // far more steeply toward the promotion rank: with no pieces left to blockade or round up
     // a passer, a pawn on the 6th/7th is close to a second queen, not just a small edge.
-    public static int[] PASSED_MG = {0, 5, 8, 12, 20, 32, 50, 0};
-    public static int[] PASSED_EG = {0, 10, 18, 30, 50, 90, 150, 0};
+    public static int[] PASSED_MG = {0, 5, 8, 12, 21, 31, 49, 0};
+    public static int[] PASSED_EG = {0, 9, 18, 33, 54, 88, 146, 0};
 
     // King-safety shield/file terms are an almost purely midgame concept -- they price in the
     // danger of enemy queen/rook fire down an open line at the king, which stops mattering
@@ -61,11 +61,11 @@ public final class Evaluator {
     // some cover against a lone rook/queen endgame, but nowhere near midgame weight; EG king
     // placement is instead driven by EG_PST[KING] rewarding centralization (see initPst()).
     public static int SHIELD_MG = 8;
-    public static int SHIELD_EG = 2;
-    public static int OPEN_FILE_MG = 20;
-    public static int OPEN_FILE_EG = 4;
+    public static int SHIELD_EG = -4;
+    public static int OPEN_FILE_MG = 21;
+    public static int OPEN_FILE_EG = 6;
     public static int SEMI_OPEN_FILE_MG = 10;
-    public static int SEMI_OPEN_FILE_EG = 3;
+    public static int SEMI_OPEN_FILE_EG = -1;
 
     // King-attack ("attack units"): each enemy piece bearing on the squares around a king
     // contributes units weighted by piece type and by how many king-zone squares it hits; the
@@ -73,7 +73,7 @@ public final class Evaluator {
     // is what lets the engine value a building attack BEFORE tactics force it into qsearch,
     // rather than reading sharp middlegames as flat. Requires >= 2 attackers (a lone piece near
     // the king is not a real threat) and is almost purely a middlegame concern (small eg).
-    public static int[] KING_ATTACK_WEIGHT = {0, 2, 2, 3, 5, 0}; // by piece TYPE
+    public static int[] KING_ATTACK_WEIGHT = {0, 2, 2, 2, 6, 0}; // by piece TYPE
     private static final int KING_ATTACK_DIVISOR = 6;   // penalty = min(units*units/DIVISOR, CAP)
     private static final int KING_ATTACK_CAP = 400;     // ceiling so one lopsided node can't dominate
     private static final int KING_ATTACK_EG_SHIFT = 4;  // eg penalty = mg penalty >> this (small)
@@ -90,13 +90,13 @@ public final class Evaluator {
     // Bad bishop: a bishop hemmed in by its own pawns fixed on its square color is a lasting
     // structural liability, worse in the endgame where it can't be traded off into activity.
     private static final long LIGHT_SQUARES = 0x55AA55AA55AA55AAL;
-    public static int BAD_BISHOP_MG = 3; // per own pawn on the bishop's square color
+    public static int BAD_BISHOP_MG = 1; // per own pawn on the bishop's square color
     public static int BAD_BISHOP_EG = 5;
 
     // Mobility by piece TYPE: rooks/queens gain relative value in the endgame (open lines
     // decide races once material thins out), while knights/bishops taper down slightly.
-    public static int[] MOBILITY_MG = {0, 4, 4, 3, 1, 0};
-    public static int[] MOBILITY_EG = {0, 3, 3, 4, 2, 0};
+    public static int[] MOBILITY_MG = {0, 4, 5, 2, 1, 0};
+    public static int[] MOBILITY_EG = {0, 4, 4, 4, 6, 0};
     // Mobility floor: squares a piece reaches that are contested only by an enemy PAWN still
     // count, at reduced weight (1/this), instead of being masked out entirely. Without it, a
     // closed position where enemy pawns blanket the board collapses both sides' mobility to
@@ -110,13 +110,13 @@ public final class Evaluator {
     // holds the initiative to open the position on its own terms, the factor flat mobility is
     // blind to in closed structures. Tapered mg-heavy (opening matters most with pieces on).
     public static int LEVER_MG = 6;
-    public static int LEVER_EG = 3;
+    public static int LEVER_EG = 2;
 
     // Passed-pawn king proximity (endgame only): a passer's value in the endgame depends
     // heavily on which king can reach its promotion square first, which pure rank scaling
     // ignores. Rewards the friendly king being close and the enemy king being far, weighted
     // by how advanced the passer already is.
-    public static int PASSER_KING_EG = 5;
+    public static int PASSER_KING_EG = 18;
 
     // Outside passed pawn (endgame only): a passer whose file is far from the enemy king is one
     // the king struggles to stop -- it decoys the king off the other wing and often decides the
@@ -128,7 +128,7 @@ public final class Evaluator {
     // openings rarely exercise anyway (same reasoning as the storm/rule50 terms). Kept on
     // because a dedicated probe confirms it fixes the targeted motif: a lone outside a-pawn
     // position scores +19cp with this term on vs off, and remains exactly color-symmetric.
-    public static int OUTSIDE_PASSER_EG = 22;
+    public static int OUTSIDE_PASSER_EG = 23;
     public static int OUTSIDE_KING_DIST = 3; // enemy-king file distance at/above which a passer is "outside"
     public static boolean useOutsidePasser = true;
 
@@ -140,16 +140,16 @@ public final class Evaluator {
     // 51.7% over 600 games (Elo +12, CI [-16,40]) -- same grey-zone-positive read as the outside-
     // passer term itself; kept for the same reason (narrow anti-specific-loss term, verified to
     // fix the targeted motif and exactly color-symmetric via OutsidePasserTest).
-    public static int PAWN_MAJORITY_EG = 12;
+    public static int PAWN_MAJORITY_EG = 7;
     public static boolean usePawnMajority = true;
     private static final long QUEENSIDE_FILES = 0x0F0F0F0F0F0F0F0FL; // files a-d
     private static final long KINGSIDE_FILES = 0xF0F0F0F0F0F0F0F0L;  // files e-h
 
     // Connected/phalanx pawn bonus and backward-pawn penalty (small, standard mg/eg pairs).
-    public static int CONNECTED_MG = 8;
-    public static int CONNECTED_EG = 6;
-    public static int BACKWARD_MG = 10;
-    public static int BACKWARD_EG = 14;
+    public static int CONNECTED_MG = 6;
+    public static int CONNECTED_EG = 3;
+    public static int BACKWARD_MG = 8;
+    public static int BACKWARD_EG = 10;
 
     // Endgame scale factor (out of SCALE_MAX): the eg score is multiplied by this before the
     // phase blend, to reflect that some material configurations are far more drawish than raw
@@ -163,8 +163,8 @@ public final class Evaluator {
     // any sacrifice lands, steering the engine away from suffocating shells. Heavily middlegame-
     // weighted: king shelter matters while heavy pieces are on the board; in the endgame an
     // active, centralized king is preferred over a sheltered one, so the eg weight is small.
-    public static int KING_RING_MG = 4;
-    public static int KING_RING_EG = 1;
+    public static int KING_RING_MG = 2;
+    public static int KING_RING_EG = 0;
     // A/B toggle (static: the evaluator is a stateless utility). Flip to false to disable the
     // term for match comparison. Shared across threads -- set once between searches, not mid-search.
     public static boolean useKingRingMobility = true;
@@ -175,14 +175,14 @@ public final class Evaluator {
     // knight/bishop hitting a center square is worth more than an equally-mobile piece
     // shuffling along the back rank. Added on top of (not instead of) the base rate, so total
     // weight for a "premium" square is MOBILITY_*[type] + the matching bonus below.
-    public static int ROOK_OPEN_FILE_MOBILITY_MG = 3;
-    public static int ROOK_OPEN_FILE_MOBILITY_EG = 2;
-    public static int QUEEN_OPEN_FILE_MOBILITY_MG = 2;
+    public static int ROOK_OPEN_FILE_MOBILITY_MG = 4;
+    public static int ROOK_OPEN_FILE_MOBILITY_EG = -2;
+    public static int QUEEN_OPEN_FILE_MOBILITY_MG = 0;
     public static int QUEEN_OPEN_FILE_MOBILITY_EG = 2;
     public static int KNIGHT_CENTER_MOBILITY_MG = 6;
-    public static int KNIGHT_CENTER_MOBILITY_EG = 4;
+    public static int KNIGHT_CENTER_MOBILITY_EG = 3;
     public static int BISHOP_CENTER_MOBILITY_MG = 5;
-    public static int BISHOP_CENTER_MOBILITY_EG = 3;
+    public static int BISHOP_CENTER_MOBILITY_EG = 2;
 
     // Central outposts: a knight or bishop parked on d4/d5/e4/e5 that no enemy pawn can ever
     // structurally challenge (see outpostScore()) is a long-term thorn the opponent can't
@@ -192,9 +192,9 @@ public final class Evaluator {
     // since, unlike bishops, they have no long-diagonal alternative outlet once parked.
     private static final long CENTER_SQUARES = (1L << 27) | (1L << 28) | (1L << 35) | (1L << 36); // d4,e4,d5,e5
     public static int OUTPOST_KNIGHT_MG = 18;
-    public static int OUTPOST_KNIGHT_EG = 12;
+    public static int OUTPOST_KNIGHT_EG = 11;
     public static int OUTPOST_BISHOP_MG = 12;
-    public static int OUTPOST_BISHOP_EG = 8;
+    public static int OUTPOST_BISHOP_EG = 7;
 
     // Threats: concrete tactical pressure the mobility/space terms are blind to. Three
     // signals, each color-differenced: an enemy piece under attack by a pawn (the cheapest
@@ -202,12 +202,12 @@ public final class Evaluator {
     // (attacked by anything, defended by nothing), and a safe pawn push that would attack a
     // piece next move (initiative the opponent must spend a tempo answering).
     // THREAT_BY_PAWN is indexed by the attacked piece's TYPE.
-    public static int[] THREAT_BY_PAWN_MG = {0, 30, 30, 40, 45, 0};
-    public static int[] THREAT_BY_PAWN_EG = {0, 22, 22, 28, 32, 0};
-    public static int HANGING_MG = 22;
-    public static int HANGING_EG = 18;
+    public static int[] THREAT_BY_PAWN_MG = {0, 32, 32, 40, 45, 0};
+    public static int[] THREAT_BY_PAWN_EG = {0, 22, 23, 27, 32, 0};
+    public static int HANGING_MG = 24;
+    public static int HANGING_EG = 20;
     public static int PAWN_PUSH_THREAT_MG = 12;
-    public static int PAWN_PUSH_THREAT_EG = 8;
+    public static int PAWN_PUSH_THREAT_EG = 6;
     // A/B toggle (see useKingRingMobility for the sharing convention).
     public static boolean useThreats = true;
 
@@ -219,8 +219,8 @@ public final class Evaluator {
     // -2 -> -4 -> -6.7 in three moves). Indexed by the pawn's rank distance ahead of the
     // king from the king's own perspective (1 = adjacent rank); mg-heavy since storms need
     // pieces behind them to matter.
-    public static int[] STORM_MG = {0, 28, 16, 8};
-    public static int[] STORM_EG = {0, 8, 4, 2};
+    public static int[] STORM_MG = {0, 27, 16, 7};
+    public static int[] STORM_EG = {0, 4, 3, 3};
     private static final int STORM_MAX_DIST = 3;
     public static boolean useKingPawnStorm = true;
 
@@ -241,7 +241,7 @@ public final class Evaluator {
     // tactical loan against the king -- counted into the attack-unit total (per checking piece
     // TYPE) before the super-linear danger formula, so imminent check threats raise danger
     // even before any capture sequence exists for qsearch to see.
-    public static int[] SAFE_CHECK_WEIGHT = {0, 3, 2, 3, 4, 0};
+    public static int[] SAFE_CHECK_WEIGHT = {0, 5, 3, 4, 6, 0};
     public static boolean useSafeChecks = true;
 
     // Mating-technique drive ("mop-up"): with overwhelming material against a near-bare king,
@@ -259,15 +259,15 @@ public final class Evaluator {
 
     // --- bishop pair / rook activity weights (tapered: separate mg/eg, unlike the flat
     // pawn/mobility/king-safety terms above) ---
-    public static int BISHOP_PAIR_MG = 15;
-    public static int BISHOP_PAIR_EG = 30;
+    public static int BISHOP_PAIR_MG = 17;
+    public static int BISHOP_PAIR_EG = 32;
 
-    public static int ROOK_OPEN_FILE_MG = 20;
-    public static int ROOK_OPEN_FILE_EG = 15;
-    public static int ROOK_SEMI_OPEN_FILE_MG = 10;
-    public static int ROOK_SEMI_OPEN_FILE_EG = 10;
-    public static int ROOK_7TH_MG = 25;
-    public static int ROOK_7TH_EG = 40;
+    public static int ROOK_OPEN_FILE_MG = 21;
+    public static int ROOK_OPEN_FILE_EG = 13;
+    public static int ROOK_SEMI_OPEN_FILE_MG = 12;
+    public static int ROOK_SEMI_OPEN_FILE_EG = 14;
+    public static int ROOK_7TH_MG = 20;
+    public static int ROOK_7TH_EG = 29;
     // Rook behind a passed pawn (Tarrasch's rule): a rook on the same file as, and behind,
     // an own passed pawn supports its advance the whole way to promotion. Endgame-heavy --
     // the motif is decisive in rook endings, minor in the middlegame. Toggleable for A/B.
@@ -1332,124 +1332,124 @@ public final class Evaluator {
      */
     private static void initPst() {
         MG_PST[PAWN] = new int[] {
-              0,   0,   0,   0,   0,   0,   0,   0,
-             98, 134,  61,  95,  68, 126,  34, -11,
-             -6,   7,  26,  31,  65,  56,  25, -20,
-            -14,  13,   6,  21,  23,  12,  17, -23,
-            -27,  -2,  -5,  12,  17,   6,  10, -25,
-            -26,  -4,  -4, -10,   3,   3,  33, -12,
-            -35,  -1, -20, -23, -15,  24,  38, -22,
-              0,   0,   0,   0,   0,   0,   0,   0,
+               0,    0,    0,    0,    0,    0,    0,    0,
+              98,  134,   61,   95,   68,  126,   34,  -11,
+              -6,    7,   26,   31,   65,   56,   25,  -20,
+             -14,   13,    6,   20,   23,   12,   17,  -23,
+             -26,   -3,   -5,   10,   16,    6,    9,  -24,
+             -25,   -4,   -3,  -10,    4,    3,   33,  -11,
+             -35,   -3,  -19,  -21,  -14,   25,   36,  -21,
+               0,    0,    0,    0,    0,    0,    0,    0,
         };
         EG_PST[PAWN] = new int[] {
-              0,   0,   0,   0,   0,   0,   0,   0,
-            178, 173, 158, 134, 147, 132, 165, 187,
-             94, 100,  85,  67,  56,  53,  82,  84,
-             32,  24,  13,   5,  -2,   4,  17,  17,
-             13,   9,  -3,  -7,  -7,  -8,   3,  -1,
-              4,   7,  -6,   1,   0,  -5,  -1,  -8,
-             13,   8,   8,  10,  13,   0,   2,  -7,
-              0,   0,   0,   0,   0,   0,   0,   0,
+               0,    0,    0,    0,    0,    0,    0,    0,
+             177,  172,  157,  133,  147,  132,  165,  187,
+              93,   99,   84,   66,   55,   53,   82,   84,
+              32,   23,   13,    5,   -1,    4,   17,   18,
+              14,    9,   -3,   -7,   -6,   -7,    3,    1,
+               4,    6,   -6,    1,    1,   -4,   -3,   -7,
+              14,    7,    8,   10,   13,    0,    0,   -6,
+               0,    0,    0,    0,    0,    0,    0,    0,
         };
         MG_PST[KNIGHT] = new int[] {
-            -167, -89, -34, -49,  61, -97, -15, -107,
-             -73, -41,  72,  36,  23,  62,   7,  -17,
-             -47,  60,  37,  65,  84, 129,  73,   44,
-              -9,  17,  19,  53,  37,  69,  18,   22,
-             -13,   4,  16,  13,  28,  19,  21,   -8,
-             -23,  -9,  12,  10,  19,  17,  25,  -16,
-             -29, -53, -12,  -3,  -1,  18, -14,  -19,
-            -105, -21, -58, -33, -17, -28, -19,  -23,
+            -167,  -89,  -34,  -49,   61,  -97,  -15, -107,
+             -73,  -41,   72,   36,   23,   62,    7,  -17,
+             -47,   60,   37,   65,   84,  129,   73,   44,
+              -9,   18,   19,   53,   37,   69,   18,   22,
+             -13,    4,   16,   13,   28,   19,   21,   -8,
+             -23,   -9,   11,   10,   19,   16,   25,  -16,
+             -29,  -53,  -12,   -2,    0,   18,  -14,  -19,
+            -105,  -21,  -58,  -33,  -17,  -28,  -19,  -23,
         };
         EG_PST[KNIGHT] = new int[] {
-            -58, -38, -13, -28, -31, -27, -63, -99,
-            -25,  -8, -25,  -2,  -9, -25, -24, -52,
-            -24, -20,  10,   9,  -1,  -9, -19, -41,
-            -17,   3,  22,  22,  22,  11,   8, -18,
-            -18,  -6,  16,  25,  16,  17,   4, -18,
-            -23,  -3,  -1,  15,  10,  -3, -20, -22,
-            -42, -20, -10,  -5,  -2, -20, -23, -44,
-            -29, -51, -23, -15, -22, -18, -50, -64,
+             -58,  -38,  -13,  -28,  -31,  -27,  -63,  -99,
+             -25,   -8,  -25,   -2,   -9,  -25,  -24,  -52,
+             -24,  -20,   10,    9,   -1,   -9,  -19,  -41,
+             -17,    3,   22,   22,   22,   11,    8,  -18,
+             -18,   -6,   16,   25,   16,   17,    4,  -18,
+             -23,   -3,   -1,   15,   10,   -3,  -20,  -22,
+             -42,  -20,  -10,   -5,   -2,  -20,  -23,  -44,
+             -29,  -51,  -23,  -15,  -22,  -18,  -50,  -64,
         };
         MG_PST[BISHOP] = new int[] {
-            -29,   4, -82, -37, -25, -42,   7,  -8,
-            -26,  16, -18, -13,  30,  59,  18, -47,
-            -16,  37,  43,  40,  35,  50,  37,  -2,
-             -4,   5,  19,  50,  37,  37,   7,  -2,
-             -6,  13,  13,  26,  34,  12,  10,   4,
-              0,  15,  15,  15,  14,  27,  18,  10,
-              4,  15,  16,   0,   7,  21,  33,   1,
-            -33,  -3, -14, -21, -13, -12, -39, -21,
+             -29,    4,  -82,  -37,  -25,  -42,    7,   -8,
+             -26,   16,  -18,  -13,   30,   59,   18,  -47,
+             -16,   37,   43,   40,   35,   50,   37,   -2,
+              -4,    5,   19,   50,   37,   37,    7,   -2,
+              -6,   13,   13,   26,   34,   11,   10,    4,
+               0,   15,   15,   14,   13,   27,   18,   10,
+               4,   16,   16,    0,    8,   21,   34,    1,
+             -33,   -3,  -12,  -21,  -13,  -12,  -39,  -21,
         };
         EG_PST[BISHOP] = new int[] {
-            -14, -21, -11,  -8,  -7,  -9, -17, -24,
-             -8,  -4,   7, -12,  -3, -13,  -4, -14,
-              2,  -8,   0,  -1,  -2,   6,   0,   4,
-             -3,   9,  12,   9,  14,  10,   3,   2,
-             -6,   3,  13,  19,   7,  10,  -3,  -9,
-            -12,  -3,   8,  10,  13,   3,  -7, -15,
-            -14, -18,  -7,  -1,   4,  -9, -15, -27,
-            -23,  -9, -23,  -5,  -9, -16,  -5, -17,
+             -14,  -21,  -11,   -8,   -7,   -9,  -17,  -24,
+              -8,   -4,    7,  -12,   -3,  -13,   -4,  -14,
+               2,   -8,    0,   -1,   -2,    6,    0,    4,
+              -3,    9,   12,    9,   14,   10,    3,    2,
+              -6,    3,   13,   19,    7,   10,   -3,   -9,
+             -12,   -3,    8,   10,   13,    3,   -7,  -15,
+             -14,  -18,   -7,   -1,    4,   -9,  -15,  -27,
+             -23,   -9,  -22,   -5,   -9,  -15,   -5,  -17,
         };
         MG_PST[ROOK] = new int[] {
-             32,  42,  32,  51,  63,   9,  31,  43,
-             27,  32,  58,  62,  80,  67,  26,  44,
-             -5,  19,  26,  36,  17,  45,  61,  16,
-            -24, -11,   7,  26,  24,  35,  -8, -20,
-            -36, -26, -12,  -1,   9,  -7,   6, -23,
-            -45, -25, -16, -17,   3,   0,  -5, -33,
-            -44, -16, -20,  -9,  -1,  11,  -6, -71,
-            -19, -13,   1,  17,  16,   7, -37, -26,
+              32,   42,   32,   51,   63,    9,   31,   43,
+              26,   31,   58,   62,   80,   67,   26,   44,
+              -5,   19,   26,   36,   17,   45,   61,   16,
+             -24,  -11,    7,   26,   24,   35,   -8,  -20,
+             -36,  -26,  -12,   -1,    9,   -7,    6,  -23,
+             -45,  -25,  -16,  -17,    3,    0,   -5,  -33,
+             -44,  -16,  -20,   -9,   -1,   11,   -6,  -71,
+             -17,  -13,    1,   16,   16,    9,  -37,  -26,
         };
         EG_PST[ROOK] = new int[] {
-            13, 10, 18, 15, 12,  12,   8,   5,
-            11, 13, 13, 11, -3,   3,   8,   3,
-             7,  7,  7,  5,  4,  -3,  -5,  -3,
-             4,  3, 13,  1,  2,   1,  -1,   2,
-             3,  5,  8,  4, -5,  -6,  -8, -11,
-            -4,  0, -5, -1, -7, -12,  -8, -16,
-            -6, -6,  0,  2, -9,  -9, -11,  -3,
-            -9,  2,  3, -1, -5, -13,   4, -20,
+              12,    9,   17,   14,   11,   12,    8,    5,
+              10,   12,   12,   10,   -4,    2,    8,    3,
+               7,    7,    7,    5,    4,   -3,   -5,   -3,
+               5,    3,   13,    1,    2,    1,   -1,    3,
+               4,    6,    8,    4,   -5,   -6,   -8,  -11,
+              -3,    0,   -5,   -1,   -7,  -12,   -8,  -16,
+              -6,   -6,    0,    2,   -9,   -9,  -11,   -3,
+              -8,    3,    3,   -1,   -5,  -13,    4,  -19,
         };
         MG_PST[QUEEN] = new int[] {
-            -28,   0,  29,  12,  59,  44,  43,  45,
-            -24, -39,  -5,   1, -16,  57,  28,  54,
-            -13, -17,   7,   8,  29,  56,  47,  57,
-            -27, -27, -16, -16,  -1,  17,  -2,   1,
-             -9, -26,  -9, -10,  -2,  -4,   3,  -3,
-            -14,   2, -11,  -2,  -5,   2,  14,   5,
-            -35,  -8,  11,   2,   8,  15,  -3,   1,
-             -1, -18,  -9,  10, -15, -25, -31, -50,
+             -28,    0,   29,   12,   59,   44,   43,   45,
+             -24,  -39,   -5,    1,  -16,   57,   28,   54,
+             -13,  -17,    7,    8,   29,   56,   47,   57,
+             -27,  -27,  -16,  -16,   -1,   17,   -2,    1,
+              -9,  -26,   -9,  -10,   -2,   -4,    3,   -3,
+             -14,    2,  -11,   -2,   -5,    2,   14,    5,
+             -35,   -8,   11,    2,    8,   15,   -3,    1,
+              -1,  -18,   -9,   10,  -15,  -25,  -31,  -50,
         };
         EG_PST[QUEEN] = new int[] {
-             -9,  22,  22,  27,  27,  19,  10,  20,
-            -17,  20,  32,  41,  58,  25,  30,   0,
-            -20,   6,   9,  49,  47,  35,  19,   9,
-              3,  22,  24,  45,  57,  40,  57,  36,
-            -18,  28,  19,  47,  31,  34,  39,  23,
-            -16, -27,  15,   6,   9,  17,  10,   5,
-            -22, -23, -30, -16, -16, -23, -36, -32,
-            -33, -28, -22, -43,  -5, -32, -20, -41,
+              -9,   22,   22,   27,   27,   19,   10,   20,
+             -17,   20,   32,   41,   58,   25,   30,    0,
+             -20,    6,    9,   49,   47,   35,   19,    9,
+               3,   22,   24,   45,   57,   40,   57,   36,
+             -18,   28,   19,   47,   31,   34,   39,   23,
+             -16,  -27,   15,    6,    9,   17,   10,    5,
+             -22,  -23,  -30,  -16,  -16,  -23,  -36,  -32,
+             -33,  -28,  -22,  -43,   -5,  -32,  -20,  -41,
         };
         MG_PST[KING] = new int[] {
-            -65,  23,  16, -15, -56, -34,   2,  13,
-             29,  -1, -20,  -7,  -8,  -4, -38, -29,
-             -9,  24,   2, -16, -20,   6,  22, -22,
-            -17, -20, -12, -27, -30, -25, -14, -36,
-            -49,  -1, -27, -39, -46, -44, -33, -51,
-            -14, -14, -22, -46, -44, -30, -15, -27,
-              1,   7,  -8, -64, -43, -16,   9,   8,
-            -15,  36,  12, -54,   8, -28,  24,  14,
+             -65,   23,   16,  -15,  -56,  -34,    2,   13,
+              29,   -1,  -20,   -7,   -8,   -4,  -38,  -29,
+              -9,   24,    2,  -16,  -20,    6,   22,  -22,
+             -17,  -20,  -12,  -27,  -30,  -25,  -14,  -36,
+             -49,   -1,  -27,  -39,  -46,  -44,  -33,  -51,
+             -14,  -14,  -22,  -46,  -44,  -30,  -15,  -27,
+               1,    7,   -8,  -64,  -43,  -16,    9,    8,
+             -15,   36,   12,  -54,    7,  -28,   24,   14,
         };
         EG_PST[KING] = new int[] {
-            -74, -35, -18, -18, -11,  15,   4, -17,
-            -12,  17,  14,  17,  17,  38,  23,  11,
-             10,  17,  23,  15,  20,  45,  44,  13,
-             -8,  22,  24,  27,  26,  33,  26,   3,
-            -18,  -4,  21,  24,  27,  23,   9, -11,
-            -19,  -3,  11,  21,  23,  16,   7,  -9,
-            -27, -11,   4,  13,  14,   4,  -5, -17,
-            -53, -34, -21, -11, -28, -14, -24, -43,
+             -74,  -35,  -18,  -18,  -11,   15,    4,  -17,
+             -12,   17,   14,   17,   17,   38,   23,   11,
+              10,   17,   23,   15,   20,   45,   44,   13,
+              -8,   22,   24,   27,   26,   33,   26,    3,
+             -18,   -4,   21,   24,   27,   23,    9,  -11,
+             -19,   -3,   11,   21,   23,   16,    8,   -9,
+             -27,  -11,    4,   13,   14,    4,   -5,  -18,
+             -53,  -34,  -21,  -11,  -28,  -14,  -26,  -44,
         };
     }
 }

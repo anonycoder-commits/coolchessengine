@@ -44,8 +44,13 @@ class EvalRegressionTest {
     //   outside-passer-on baseline): positions 7/8 (indices 6/7) shift further to -210/-344.
     //   Re-verify both changed FENs fresh (not from memory) after touching either toggle --
     //   an earlier stale-Gradle-cache false pass on this exact test taught that lesson.
+    //   Texel material+PST+aux tune (2026-07-05, lambda=0.0005 on the zurichess quiet corpus,
+    //   run 28721302257): ALL 11 positions shift because material values, all 768 PST entries,
+    //   and ~50 aux weights were re-fit (sane -- P<N<=B<R<Q preserved, no structural sign
+    //   flips; applied byte-exact from tuned_L0.0005.txt, verified via reflection dump).
+    //   Re-derived fresh from the tuned Evaluator, NOT hand-edited.
     private static final int[] EXPECTED = {
-        15, 96, -7, 83, 130, 16, -210, -344, 15, -911, 1167,
+        23, 99, 20, 101, 133, 24, -223, -279, 23, -1009, 1233,
     };
 
     @Test
