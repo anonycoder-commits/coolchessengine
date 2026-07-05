@@ -11,12 +11,17 @@ import engine.board.Position;
 /**
  * NNUE evaluation (roadmap Phase 1: correctness-first, NON-incremental).
  *
- * Architecture: {@code (768 -> N)x2 -> 1} perspective net, single hidden layer, clipped
- * ReLU, integer-quantized end-to-end. Every {@link #evaluate} does a FULL accumulator
- * refresh from the {@link Position} (no incremental accumulator, no Position coupling) --
- * slow but trivially correct. Phase 3 adds the efficiently-updatable accumulator.
+ * Architecture: {@code (768 -> N)x2 -> 1} perspective net, single hidden layer, SCReLU,
+ * integer-quantized end-to-end. Every {@link #evaluate} does a FULL accumulator refresh from
+ * the {@link Position} (no incremental accumulator, no Position coupling) -- slow but trivially
+ * correct. Phase 3 adds the efficiently-updatable accumulator.
  *
- * <h2>Feature indexing (must match bullet's {@code Chess768})</h2>
+ * <p>This mirrors bullet's stock {@code examples/simple.rs} exactly -- same feature set
+ * ({@code Chess768}), activation (SCReLU), quantization (QA/QB/SCALE) and inference arithmetic
+ * -- so a net trained by that example loads and evaluates identically. The engine reads bullet's
+ * raw saved format directly (no conversion step).
+ *
+ * <h2>Feature indexing (bullet {@code Chess768})</h2>
  * 768 = 12 piece-indices x 64 squares. A piece with engine index {@code p} (0..11:
  * {@code W_PAWN..B_KING}, i.e. {@code color*6 + type}) on square {@code sq} (a1=0):
  * <ul>
@@ -29,24 +34,39 @@ import engine.board.Position;
  * first {@code hidden} output weights multiply the STM accumulator, the next {@code hidden}
  * the non-STM accumulator. This STM-first ordering is what encodes tempo.
  *
- * <h2>Quantization</h2>
+ * <h2>Quantization / inference (matches bullet {@code Network::evaluate})</h2>
  * ft weights/bias scaled x{@code QA} (=255); output weights x{@code QB} (=64); output bias
- * x{@code QA*QB}. Activation is clipped ReLU {@code clamp(acc, 0, QA)}. Final centipawns =
- * {@code (sum + outBias) * SCALE / (QA*QB)}, truncated toward zero, clamped to stay well
- * inside the {@link Evaluator} mate-safety band.
+ * x{@code QA*QB}. Activation SCReLU {@code s = clamp(acc,0,QA)^2}. Then, in this exact staged
+ * order (integer, truncating toward zero at each division):
+ * <pre>
+ *   out  = sum over both halves of SCReLU(acc) * outWeight   // scale QA*QA*QB
+ *   out /= QA                                                // -> QA*QB
+ *   out += outBias                                           // QA*QB
+ *   out *= SCALE
+ *   out /= QA*QB                                             // centipawns
+ * </pre>
+ * The result is clamped to stay well inside the {@link Evaluator} mate-safety band.
  *
- * <p><b>Correctness note.</b> The {@code ^56} flip, colour-swap and concat order above are the
- * canonical bullet convention but are only <i>proven</i> against a real trained net by the
- * Java-vs-reference-Python cross-check (see {@code tools/nnue/nnue_ref.py}). Internally,
- * {@code NnueSymmetryTest} pins that this class is self-consistent (mirror invariance) for any
- * weights, which catches an index/flip/order bug without a trained net.
+ * <h2>File format (bullet raw {@code SavedFormat} dump, little-endian, no header)</h2>
+ * {@code ftWeights[768*hidden]} (feature-major), {@code ftBias[hidden]},
+ * {@code outWeights[2*hidden]} (STM half first), {@code outBias}. All {@code i16}. {@code hidden}
+ * is inferred from the file length; QA/QB/SCALE are fixed to bullet's defaults. Requires
+ * {@code hidden} a multiple of 32 so bullet's {@code align(64)} accumulator layout is
+ * padding-free (256 satisfies this).
+ *
+ * <p><b>Correctness note.</b> The {@code ^56} flip, colour-swap and concat order are the bullet
+ * convention but are only <i>proven</i> against a real trained net by the Java-vs-reference
+ * cross-check ({@code NnueProbe} vs {@code nnue_ref.py} vs bullet's own eval). Internally,
+ * {@code NnueSymmetryTest} pins self-consistency (mirror invariance) for any weights, catching
+ * an index/flip/order bug without a trained net.
  */
 public final class NnueEvaluator implements Evaluator {
 
-    /** Magic 'C','N','U','E' + version, guarding against a truncated/foreign weights file. */
-    static final int MAGIC = ('C' << 24) | ('N' << 16) | ('U' << 8) | 'E';
-    static final int VERSION = 1;
     static final int INPUTS = 768;
+    // bullet simple.rs defaults; the raw file carries no header, so these are fixed here.
+    static final int QA = 255;
+    static final int QB = 64;
+    static final int SCALE = 400;
 
     /** Immutable, thread-shareable parsed network. One instance is shared across workers. */
     public static final class Network {
@@ -81,46 +101,31 @@ public final class NnueEvaluator implements Evaluator {
     }
 
     /**
-     * Reads the little-endian weights format written by {@code tools/nnue/nnue_ref.py}
-     * (and, later, the bullet export). Layout after the 28-byte header:
-     * ftWeights[INPUTS*hidden], ftBias[hidden], outWeights[2*hidden], outBias -- all i16
-     * except the i32 header fields.
+     * Reads bullet's raw saved format (header-less, little-endian i16). {@code hidden} is
+     * inferred from the byte count: total shorts = {@code 768*h + h + 2*h + 1 = 771*h + 1}.
      */
     public static Network load(InputStream in) throws IOException {
         byte[] all = in.readAllBytes();
+        if (all.length < 2 || (all.length & 1) != 0) {
+            throw new IOException("NNUE: odd/empty file (" + all.length + " bytes)");
+        }
+        long shorts = all.length / 2L;
+        if ((shorts - 1) % (INPUTS + 3) != 0) {
+            throw new IOException("NNUE: " + all.length + " bytes is not a valid (768->N)x2->1 net");
+        }
+        int hidden = (int) ((shorts - 1) / (INPUTS + 3)); // 768 + 1 (ftBias) + 2 (outW) per hidden
+        if (hidden <= 0 || (hidden % 32) != 0) {
+            throw new IOException("NNUE: hidden=" + hidden + " must be a positive multiple of 32");
+        }
         ByteBuffer buf = ByteBuffer.wrap(all).order(ByteOrder.LITTLE_ENDIAN);
-        int magic = buf.getInt();
-        if (magic != MAGIC) {
-            throw new IOException("NNUE: bad magic 0x" + Integer.toHexString(magic));
-        }
-        int version = buf.getInt();
-        if (version != VERSION) {
-            throw new IOException("NNUE: unsupported version " + version);
-        }
-        int inputs = buf.getInt();
-        if (inputs != INPUTS) {
-            throw new IOException("NNUE: expected " + INPUTS + " inputs, got " + inputs);
-        }
-        int hidden = buf.getInt();
-        int qa = buf.getInt();
-        int qb = buf.getInt();
-        int scale = buf.getInt();
-        if (hidden <= 0 || qa <= 0 || qb <= 0 || scale <= 0) {
-            throw new IOException("NNUE: nonsensical header " + hidden + "/" + qa + "/" + qb + "/" + scale);
-        }
-
-        short[] ftWeights = readShorts(buf, inputs * hidden);
+        short[] ftWeights = readShorts(buf, INPUTS * hidden);
         short[] ftBias = readShorts(buf, hidden);
         short[] outWeights = readShorts(buf, 2 * hidden);
         int outBias = buf.getShort();
-        return new Network(hidden, qa, qb, scale, ftWeights, ftBias, outWeights, outBias);
+        return new Network(hidden, QA, QB, SCALE, ftWeights, ftBias, outWeights, outBias);
     }
 
-    private static short[] readShorts(ByteBuffer buf, int n) throws IOException {
-        if (buf.remaining() < n * 2) {
-            throw new IOException("NNUE: file truncated, wanted " + n + " shorts, "
-                    + buf.remaining() + " bytes left");
-        }
+    private static short[] readShorts(ByteBuffer buf, int n) {
         short[] out = new short[n];
         for (int i = 0; i < n; i++) out[i] = buf.getShort();
         return out;
@@ -145,7 +150,7 @@ public final class NnueEvaluator implements Evaluator {
             if (bb == 0) continue;
             int color = p / 6;
             int type = p % 6;
-            int whitePieceIdx = p;                    // friendly=white when viewed from white
+            int whitePieceIdx = p;                      // friendly=white when viewed from white
             int blackPieceIdx = (color ^ 1) * 6 + type; // colours swapped for the black view
             int wBase = whitePieceIdx * 64;
             int bBase = blackPieceIdx * 64;
@@ -161,31 +166,33 @@ public final class NnueEvaluator implements Evaluator {
             }
         }
 
-        // Concatenate STM half first, apply clipped ReLU, dot with the output weights.
+        // Concatenate STM half first, SCReLU, dot with output weights -- bullet's exact staging.
         int[] stm = pos.sideToMove() == Piece.WHITE ? w : b;
         int[] nstm = pos.sideToMove() == Piece.WHITE ? b : w;
         final short[] outW = net.outWeights;
         final int qa = net.qa;
-        long sum = 0;
+        long out = 0;
         for (int i = 0; i < hidden; i++) {
-            sum += (long) crelu(stm[i], qa) * outW[i];
+            out += (long) screlu(stm[i], qa) * outW[i];
         }
         for (int i = 0; i < hidden; i++) {
-            sum += (long) crelu(nstm[i], qa) * outW[hidden + i];
+            out += (long) screlu(nstm[i], qa) * outW[hidden + i];
         }
-        sum += net.outBias;
+        out /= qa;                       // QA*QA*QB -> QA*QB
+        out += net.outBias;              // QA*QB
+        out *= net.scale;
+        out /= (long) qa * net.qb;       // -> centipawns (truncates toward zero)
 
-        long cp = sum * net.scale / ((long) qa * net.qb); // integer, truncates toward zero
         // Honour the Evaluator contract: never collide with mate scores.
         int bound = Search.MATE_IN_MAX - 1;
-        if (cp > bound) cp = bound;
-        else if (cp < -bound) cp = -bound;
-        return (int) cp;
+        if (out > bound) out = bound;
+        else if (out < -bound) out = -bound;
+        return (int) out;
     }
 
-    private static int crelu(int x, int qa) {
-        if (x < 0) return 0;
-        if (x > qa) return qa;
-        return x;
+    /** Square Clipped ReLU: clamp to [0, QA] then square (0 .. QA*QA). */
+    private static int screlu(int x, int qa) {
+        int y = x < 0 ? 0 : (x > qa ? qa : x);
+        return y * y;
     }
 }

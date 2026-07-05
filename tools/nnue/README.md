@@ -3,8 +3,8 @@
 Follows `nnueroadmap.md`. This directory holds the offline, zero-engine-code Phase 0:
 turn the existing labeled corpora into a training set and train the first net.
 
-Target first net: **`(768 → 256)×2 → 1`** perspective net, CReLU, int16 quant — the
-simplest thing that works (see the roadmap for the full architecture rationale).
+Target first net: **`(768 → 256)×2 → 1`** perspective net, SCReLU, int16 quant — matches
+bullet's stock `examples/simple.rs` (see the roadmap for the full architecture rationale).
 
 ## 1. Build the training text (done in-repo, CPU, fast)
 
@@ -34,45 +34,45 @@ utility before training.
 
 ## 3. Train (local RTX 5060 Ti, minutes)
 
-Blackwell needs CUDA 12.8+. A bullet training program (Rust, `TrainerBuilder`) configures:
+Blackwell needs CUDA 12.8+. Start from bullet's stock `examples/simple.rs` — it is already
+this exact net (`(768->HIDDEN)x2->1`, `Chess768`, dual perspective, SCReLU, QA=255/QB=64/
+SCALE=400). The engine mirrors it, so the only edits needed are:
 
-- input features: `Chess768` (768 = 6 piece-types × 2 colors × 64 squares), perspective
-- hidden size **256**, activation CReLU
-- `wdl` weight (lambda) = **1.0 (pure WDL)** for this net — score column is 0
-- quant: accumulator ×255, output ×64 (matches the engine-side contract in the roadmap)
-- export quantized weights (a few hundred KB)
+- `HIDDEN_SIZE = 256` (multiple of 32; the example ships 128)
+- `wdl::ConstantWDL { value: 1.0 }` — **pure WDL**, because our text data has score=0 (game
+  result is the only label); the stock 0.75 would blend in a meaningless sigmoid(0) target
+- data loader → `DirectSequentialDataLoader::new(&["data/bootstrap.data"])`
+- leave activation (`screlu`), QA, QB, SCALE, and the save format as-is — the engine matches them
 
-Bullet's API changes between versions — copy the closest example under bullet's own
-`examples/` / `docs/` rather than pasting a config from here. Deliverable of Phase 0 is the
-exported weights file; **no engine change yet** (that's Phase 1: `NnueEvaluator`).
+Run with `cargo run --release --example simple`; the quantised `.bin` in `checkpoints/` is the
+net. Deliverable of Phase 0 is that file; it drops straight into the engine via `EvalFile`.
+(Note: our dataset is small ~1.1M positions, so consider a smaller `end_superbatch` to limit
+overfitting — but the defaults will produce a gate-able first net.)
 
 ## Phase 1 — engine-side inference (non-incremental), correctness-first
 
 `engine.search.NnueEvaluator` implements the `Evaluator` interface with a full accumulator
-refresh every call. Architecture `(768 -> N)x2 -> 1`, clipped ReLU, int16 quant. HCE stays
-the default eval — nothing is wired into search/UCI yet (that's Phase 2, once a real net
-exists to bundle; a random net has no value in a game).
+refresh every call. Architecture `(768 -> N)x2 -> 1`, **SCReLU**, int16 quant. It mirrors
+bullet's stock `examples/simple.rs` exactly (same feature set, activation, quant, and staged
+inference arithmetic), so a net trained by that example **drops in with no conversion**. HCE
+stays the default eval.
 
-### Weights file format (little-endian)
+### Weights file format = bullet's raw `SavedFormat` dump (little-endian i16, no header)
 
-| bytes | field | value |
-|-------|-------|-------|
-| i32   | magic | `0x434E5545` |
-| i32   | version | 1 |
-| i32   | inputs | 768 |
-| i32   | hidden | N |
-| i32   | QA | 255 (ft scale) |
-| i32   | QB | 64 (output scale) |
-| i32   | SCALE | 400 (eval scale) |
-| i16 × 768·N | ftWeights | feature-major `[feature*N + i]` |
-| i16 × N | ftBias | |
-| i16 × 2N | outWeights | **STM half first**, then non-STM |
-| i16 | outBias | scaled QA·QB |
+| i16 count | field | notes |
+|-----------|-------|-------|
+| 768·N | ftWeights (`l0w`) | feature-major `[feature*N + i]`, scale QA=255 |
+| N | ftBias (`l0b`) | scale QA |
+| 2·N | outWeights (`l1w`) | **STM half first**, then non-STM, scale QB=64 |
+| 1 | outBias (`l1b`) | scale QA·QB |
+
+`N` (hidden) is inferred from the file length (`shorts = 771·N + 1`); QA/QB/SCALE=400 are fixed
+to bullet's defaults. `N` must be a multiple of 32 (256 works) so bullet's `align(64)`
+accumulator layout is padding-free. Inference (matching bullet `Network::evaluate`): SCReLU
+`clamp(acc,0,QA)^2`, then staged `out /= QA; out += bias; out *= SCALE; out /= QA*QB`.
 
 Feature index for a piece (engine index `p` = `color*6+type`, square `sq`, a1=0):
-white-perspective `p*64 + sq`; black-perspective `((color^1)*6+type)*64 + (sq^56)`. The bullet
-export program (Phase 0 step 3) must write this exact layout — adapt its `save`/`quantise`
-step, or transpose bullet's native dump into it.
+white-perspective `p*64 + sq`; black-perspective `((color^1)*6+type)*64 + (sq^56)`.
 
 ### Verification (all green, run `./gradlew test --tests "engine.search.Nnue*"`)
 

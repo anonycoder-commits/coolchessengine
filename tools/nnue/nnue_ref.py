@@ -11,17 +11,17 @@ Two roles:
   * `--eval NET`     reads FENs from stdin, prints one eval per line -- for cross-checking a
     REAL trained net against both this reference AND bullet's own output (Phase 2).
 
-Weights format (little-endian): header i32[7] = magic(0x434E5545), version(1), inputs(768),
-hidden, QA, QB, SCALE; then i16 arrays ftWeights[768*hidden] (feature-major), ftBias[hidden],
-outWeights[2*hidden] (STM half first), outBias(i16).
+Weights format = bullet's raw SavedFormat dump (little-endian i16, NO header): ftWeights
+[768*hidden] (feature-major), ftBias[hidden], outWeights[2*hidden] (STM half first), outBias.
+`hidden` is inferred from the file length. Activation is SCReLU and the inference arithmetic is
+staged exactly as bullet's `Network::evaluate` (matches engine.search.NnueEvaluator).
 """
 import argparse
 import struct
 import sys
 
-MAGIC = 0x434E5545  # matches Java ('C'<<24)|('N'<<16)|('U'<<8)|'E', read little-endian
-VERSION = 1
 INPUTS = 768
+QA, QB, SCALE = 255, 64, 400  # bullet simple.rs defaults (no header carries them)
 
 PIECE_FROM_CHAR = {  # -> engine piece index color*6+type (P N B R Q K)
     'P': 0, 'N': 1, 'B': 2, 'R': 3, 'Q': 4, 'K': 5,
@@ -75,22 +75,24 @@ class Net:
                 w[i] += self.ftw[wo + i]
                 b[i] += self.ftw[bo + i]
         acc_stm, acc_nstm = (w, b) if stm == 0 else (b, w)
-        s = 0
+        out = 0
         for i in range(h):
-            s += _crelu(acc_stm[i], self.qa) * self.outw[i]
+            out += _screlu(acc_stm[i], self.qa) * self.outw[i]
         for i in range(h):
-            s += _crelu(acc_nstm[i], self.qa) * self.outw[h + i]
-        s += self.outb
-        return trunc_div(s * self.scale, self.qa * self.qb)
+            out += _screlu(acc_nstm[i], self.qa) * self.outw[h + i]
+        out = trunc_div(out, self.qa)     # QA*QA*QB -> QA*QB
+        out += self.outb                  # QA*QB
+        out *= self.scale
+        return trunc_div(out, self.qa * self.qb)
 
 
-def _crelu(x, qa):
-    return 0 if x < 0 else (qa if x > qa else x)
+def _screlu(x, qa):
+    y = 0 if x < 0 else (qa if x > qa else x)
+    return y * y
 
 
 def write_net(path, net: Net):
-    with open(path, "wb") as f:
-        f.write(struct.pack("<7i", MAGIC, VERSION, INPUTS, net.hidden, net.qa, net.qb, net.scale))
+    with open(path, "wb") as f:  # bullet raw format: no header, tight-packed i16
         f.write(struct.pack(f"<{len(net.ftw)}h", *net.ftw))
         f.write(struct.pack(f"<{len(net.ftb)}h", *net.ftb))
         f.write(struct.pack(f"<{len(net.outw)}h", *net.outw))
@@ -100,9 +102,10 @@ def write_net(path, net: Net):
 def read_net(path) -> Net:
     with open(path, "rb") as f:
         data = f.read()
-    magic, ver, inputs, hidden, qa, qb, scale = struct.unpack_from("<7i", data, 0)
-    assert magic == MAGIC and ver == VERSION and inputs == INPUTS, "bad header"
-    off = 28
+    shorts = len(data) // 2
+    assert len(data) % 2 == 0 and (shorts - 1) % (INPUTS + 3) == 0, "not a valid raw net"
+    hidden = (shorts - 1) // (INPUTS + 3)
+    off = 0
 
     def take(n):
         nonlocal off
@@ -114,7 +117,7 @@ def read_net(path) -> Net:
     ftb = take(hidden)
     outw = take(2 * hidden)
     outb = take(1)[0]
-    return Net(hidden, qa, qb, scale, ftw, ftb, outw, outb)
+    return Net(hidden, QA, QB, SCALE, ftw, ftb, outw, outb)
 
 
 # Positions covering both sides to move, castling, en passant, and lopsided material.
@@ -134,15 +137,16 @@ FIXTURE_FENS = [
 ]
 
 
-def gen_fixture(net_path, golden_path, hidden=16, seed=1234):
-    """Deterministic small net so the committed fixture is tiny (~24 KB) and reproducible."""
+def gen_fixture(net_path, golden_path, hidden=32, seed=1234):
+    """Deterministic small net (hidden a multiple of 32, like a real net) so the committed
+    fixture stays tiny (~49 KB) and reproducible."""
     import random
     rng = random.Random(seed)
     ftw = [rng.randint(-64, 64) for _ in range(INPUTS * hidden)]
     ftb = [rng.randint(-128, 128) for _ in range(hidden)]
     outw = [rng.randint(-64, 64) for _ in range(2 * hidden)]
     outb = rng.randint(-2000, 2000)
-    net = Net(hidden, 255, 64, 400, ftw, ftb, outw, outb)
+    net = Net(hidden, QA, QB, SCALE, ftw, ftb, outw, outb)
     write_net(net_path, net)
     # round-trip through the file so the golden reflects exactly what a loader will parse
     net = read_net(net_path)
