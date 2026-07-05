@@ -29,6 +29,7 @@ lichess-bot/.venv/
 *.epd
 !tools/epd/*.epd
 *.bin
+!src/test/resources/nnue/*.bin
 *.dat
 *.db
 *.nnue
