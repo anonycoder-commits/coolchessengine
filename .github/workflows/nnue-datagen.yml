@@ -5,7 +5,18 @@ name: NNUE self-play data generation
 # training file -- the same sharding pattern self-play-gate.yml uses for gates, applied to data
 # generation instead. Public repo => these runs consume no billed Actions minutes.
 #
-# Manual only (workflow_dispatch): dispatch deliberately for a specific generation batch.
+# Two triggers:
+#   - workflow_dispatch: manual, fully configurable via the "Run workflow" form.
+#   - schedule: fires automatically (see cron below) with no form to fill in, so it uses the
+#     hardcoded defaults in the `config` job below instead. GitHub only reads `schedule`
+#     triggers from the DEFAULT BRANCH's copy of this file (not whatever `ref` is checked out
+#     inside the job), so this file must be kept in sync on main whenever it changes here.
+#   Each run's artifacts (per-shard + combined) are independent per GitHub Actions run; running
+#   this repeatedly accumulates SEPARATE selfplay-combined artifacts to download and merge, not
+#   one growing file.
+#
+# To stop the recurring runs later: delete/comment out the `schedule:` block below (on main) or
+# disable this workflow from the repo's Actions tab.
 
 on:
   workflow_dispatch:
@@ -32,15 +43,41 @@ on:
         default: "12"
         type: choice
         options: ["1", "2", "3", "4", "6", "8", "12", "16", "20"]
+  schedule:
+    # Every 6 hours. A new run starting before the previous one finishes is harmless (both just
+    # run independently) -- there's no shared state between runs, only shared, free CI capacity.
+    - cron: "0 */6 * * *"
 
 jobs:
+  # Resolves one shared config regardless of trigger: workflow_dispatch's `inputs` context is
+  # empty on a `schedule` run, so every value falls back to the hardcoded default via `||`.
+  # Downstream jobs read `needs.config.outputs.*` instead of `inputs.*` directly so both
+  # trigger types work from a single definition.
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.cfg.outputs.ref }}
+      games: ${{ steps.cfg.outputs.games }}
+      depth: ${{ steps.cfg.outputs.depth }}
+      random_plies: ${{ steps.cfg.outputs.random_plies }}
+      shards: ${{ steps.cfg.outputs.shards }}
+    steps:
+      - id: cfg
+        run: |
+          echo "ref=${{ inputs.ref || 'nnue/phase1-inference' }}" >> "$GITHUB_OUTPUT"
+          echo "games=${{ inputs.games || '200000' }}" >> "$GITHUB_OUTPUT"
+          echo "depth=${{ inputs.depth || '8' }}" >> "$GITHUB_OUTPUT"
+          echo "random_plies=${{ inputs.random_plies || '8' }}" >> "$GITHUB_OUTPUT"
+          echo "shards=${{ inputs.shards || '20' }}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: config
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.config.outputs.ref }}
       - name: Set up JDK 25
         uses: actions/setup-java@v4
         with:
@@ -56,7 +93,7 @@ jobs:
           retention-days: 1
 
   generate:
-    needs: build
+    needs: [config, build]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -68,7 +105,7 @@ jobs:
       - name: Skip if shard index >= requested shard count
         id: check
         run: |
-          if [ "${{ matrix.shard }}" -ge "${{ inputs.shards }}" ]; then
+          if [ "${{ matrix.shard }}" -ge "${{ needs.config.outputs.shards }}" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -89,8 +126,8 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         run: |
           set -euo pipefail
-          TOTAL=${{ inputs.games }}
-          SHARDS=${{ inputs.shards }}
+          TOTAL=${{ needs.config.outputs.games }}
+          SHARDS=${{ needs.config.outputs.shards }}
           IDX=${{ matrix.shard }}
           # Distribute any remainder across the first (TOTAL % SHARDS) shards, same split
           # self-play-gate.yml uses, so shard sizes differ by at most 1.
@@ -105,11 +142,13 @@ jobs:
           # <-seed> + g) -- without this every shard would replay IDENTICAL self-play games
           # (same seed, same deterministic fixed-depth search) and the parallelism would be
           # pure waste. A 10,000,000 gap per shard is far larger than any shard's game count.
-          SEED=$(( IDX * 10000000 + 1 ))
+          # Also folds in the run id so REPEATED (e.g. scheduled) runs don't collide with each
+          # other's seed ranges either.
+          SEED=$(( IDX * 10000000 + (${{ github.run_id }} % 1000) * 100000000 + 1 ))
           echo "Shard $IDX: $MY_GAMES games, seed base $SEED"
           java -cp classes engine.tools.DataGen \
-            -out shard-$IDX.txt -games "$MY_GAMES" -depth ${{ inputs.depth }} \
-            -random ${{ inputs.random_plies }} -concurrency 2 -seed "$SEED"
+            -out shard-$IDX.txt -games "$MY_GAMES" -depth ${{ needs.config.outputs.depth }} \
+            -random ${{ needs.config.outputs.random_plies }} -concurrency 2 -seed "$SEED"
       - name: Upload shard output
         if: steps.check.outputs.skip == 'false'
         uses: actions/upload-artifact@v4
