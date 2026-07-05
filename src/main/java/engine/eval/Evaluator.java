@@ -500,6 +500,23 @@ public final class Evaluator {
                     + Long.bitCount(bn) + Long.bitCount(bb);
             if (minors <= 1) return 0;
         }
+
+        // R + a single minor vs R, pawnless and queenless (KRBKR / KRNKR): the classic "up a
+        // whole piece but a theoretical draw" fortress. The HCE counts the extra minor as ~+3,
+        // which led it to SIMPLIFY a real advantage straight into this dead-drawn ending
+        // (observed live: a +3.5 eval that the 7-man tablebase scored wdl=0). Scaling the eg
+        // hard toward zero makes the ending read as barely-better-than-equal, so the engine
+        // keeps material on to preserve genuine winning chances rather than trading into the
+        // fortress. Not fully zero: it is still a shade better than nothing, and against
+        // imperfect defence it is often won in practice. Symmetric (whiteUp/blackUp mirror).
+        if ((wp | bp) == 0 && (wq | bq) == 0
+                && Long.bitCount(wr) == 1 && Long.bitCount(br) == 1) {
+            int wMinors = Long.bitCount(wn) + Long.bitCount(wb);
+            int bMinors = Long.bitCount(bn) + Long.bitCount(bb);
+            boolean whiteUp = wMinors == 1 && bMinors == 0;
+            boolean blackUp = bMinors == 1 && wMinors == 0;
+            if (whiteUp || blackUp) return SCALE_MAX / 8;
+        }
         return SCALE_MAX;
     }
 
