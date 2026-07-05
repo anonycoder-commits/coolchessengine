@@ -1,0 +1,141 @@
+name: NNUE self-play data generation
+
+# Runs engine.tools.DataGen (self-play, handcrafted-eval teacher) sharded across several
+# parallel GitHub-hosted runners, then concatenates every shard's output into one combined
+# training file -- the same sharding pattern self-play-gate.yml uses for gates, applied to data
+# generation instead. Public repo => these runs consume no billed Actions minutes.
+#
+# Manual only (workflow_dispatch): dispatch deliberately for a specific generation batch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build (branch/tag/commit) -- must contain engine.tools.DataGen"
+        required: true
+        default: "nnue/phase1-inference"
+      games:
+        description: "Total games across all shards"
+        required: true
+        default: "20000"
+      depth:
+        description: "Fixed search depth per move (teacher = handcrafted eval)"
+        required: true
+        default: "8"
+      random_plies:
+        description: "Randomized opening plies per game (diversifies games)"
+        required: true
+        default: "8"
+      shards:
+        description: "Number of parallel shards"
+        required: true
+        default: "12"
+        type: choice
+        options: ["1", "2", "3", "4", "6", "8", "12", "16", "20"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Build
+        run: chmod +x gradlew && ./gradlew compileJava -q
+      - name: Upload classes
+        uses: actions/upload-artifact@v4
+        with:
+          name: datagen-classes
+          path: build/classes/java/main
+          retention-days: 1
+
+  generate:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Fixed 20-slot matrix (max option in the shards choice list); slots >= the requested
+        # shard count skip themselves immediately -- see self-play-gate.yml for the same pattern.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - name: Skip if shard index >= requested shard count
+        id: check
+        run: |
+          if [ "${{ matrix.shard }}" -ge "${{ inputs.shards }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set up JDK 25
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Download classes
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: datagen-classes
+          path: classes
+      - name: Run this shard
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          TOTAL=${{ inputs.games }}
+          SHARDS=${{ inputs.shards }}
+          IDX=${{ matrix.shard }}
+          # Distribute any remainder across the first (TOTAL % SHARDS) shards, same split
+          # self-play-gate.yml uses, so shard sizes differ by at most 1.
+          BASE=$(( TOTAL / SHARDS ))
+          REM=$(( TOTAL % SHARDS ))
+          if [ "$IDX" -lt "$REM" ]; then
+            MY_GAMES=$(( BASE + 1 ))
+          else
+            MY_GAMES=$BASE
+          fi
+          # Distinct, non-overlapping seed range per shard (DataGen seeds game g with
+          # <-seed> + g) -- without this every shard would replay IDENTICAL self-play games
+          # (same seed, same deterministic fixed-depth search) and the parallelism would be
+          # pure waste. A 10,000,000 gap per shard is far larger than any shard's game count.
+          SEED=$(( IDX * 10000000 + 1 ))
+          echo "Shard $IDX: $MY_GAMES games, seed base $SEED"
+          java -cp classes engine.tools.DataGen \
+            -out shard-$IDX.txt -games "$MY_GAMES" -depth ${{ inputs.depth }} \
+            -random ${{ inputs.random_plies }} -concurrency 2 -seed "$SEED"
+      - name: Upload shard output
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: datagen-shard-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}.txt
+          retention-days: 7
+
+  aggregate:
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all shard outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: datagen-shard-*
+          path: shards
+          merge-multiple: false
+      - name: Concatenate into one training file
+        run: |
+          set -euo pipefail
+          find shards -name '*.txt' -exec cat {} \; > selfplay-combined.txt
+          echo "Combined positions: $(wc -l < selfplay-combined.txt)"
+      - name: Upload combined dataset
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfplay-combined
+          path: selfplay-combined.txt
+          retention-days: 14
