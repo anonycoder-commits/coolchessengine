@@ -328,7 +328,11 @@ public final class Search {
     private static final int CORR_GRAIN = 256;       // fixed-point units per centipawn
     private static final int CORR_LIMIT = 32 * CORR_GRAIN; // max correction: +-32cp
     private static final int CORR_WEIGHT_MAX = 16;   // deeper results move the average harder
-    private static final int CORR_WEIGHT_SCALE = 64;
+    // Slow moving-average rate: a single deep node pulls the average at most 16/256 ~= 6% toward
+    // its target. Was 64 (~25% per node), ~4x more aggressive than the canonical correction-history
+    // rate -- that over-reacted to individual subtrees and made the signal jittery (see the audit
+    // that motivated the corrhist re-gate; dormant while useCorrectionHistory is off).
+    private static final int CORR_WEIGHT_SCALE = 256;
     private final int[][] corrHist = new int[2][CORR_SIZE];
     // Per-ply static-eval stack: records each node's static eval (or a sentinel when in
     // check), so a node can cheaply ask whether the side to move is "improving" relative to
@@ -526,10 +530,15 @@ public final class Search {
     // unbiased referee re-gate scored corrHist-on at 48.2%/300 games (Elo -13, CI [-52,27]) --
     // no evidence of gain at 100ms/move. RE-CONFIRMED 2026-07-04 on the distributed GitHub-Actions
     // gate: 48.2%/600 games (Elo -13, CI [-41,+15]) -- same score, same point estimate, tighter CI,
-    // independent sample. Two aligned negative reads; not re-testing again without a real change
-    // to the eval (this engine's HCE has never been Texel-tuned) or an NNUE eval. Theoretically
-    // sound (standard in strong engines), so the code stays as a documented retest candidate
-    // rather than being deleted -- cheap to re-gate later if the eval landscape actually changes.
+    // independent sample. Re-examined 2026-07-05 after the eval was Texel-tuned +49 Elo: an audit
+    // vs the canonical Stockfish implementation found two real deviations that made this noisier
+    // than the proven version -- it folded in capture-driven (tactical) swings and used a
+    // ~4x-too-aggressive moving average. Both are now FIXED (capture exclusion at the update site;
+    // CORR_WEIGHT_SCALE 64->256). The faithful version re-gated at 50.1% / +1 Elo [-17,+19] -- a
+    // real point-estimate lift over the noisy -11, but neutral: a single HCE correction table sits
+    // below this campaign's gate-resolution floor. Kept OFF (no measurable gain to justify ON), but
+    // the code is now correct and ready for the NNUE eval, where correction history pays more.
+    // Don't re-gate again on the HCE without a genuinely new reason.
     public boolean useCorrectionHistory = false; // pawn-structure-keyed static-eval correction
 
     // Adaptive time management: game-ply moves-to-go estimate + continuous stability/eval-trend/
@@ -1609,10 +1618,13 @@ public final class Search {
         // Correction-history update: fold in this node's (result - static eval) difference,
         // but only when the result can legitimately disagree with the eval -- never in check
         // (no eval exists), never on mate scores (not an eval-scale quantity), never from an
-        // exclusion search, and only when the bound direction actually constrains the true
-        // score (a fail-low BELOW the eval or fail-high ABOVE it says nothing about where the
-        // exact value sits relative to the eval).
+        // exclusion search, never when the best move is a capture (a tactical swing, not the
+        // positional bias the pawn-structure table should learn -- the canonical implementation
+        // excludes these), and only when the bound direction actually constrains the true score
+        // (a fail-low BELOW the eval or fail-high ABOVE it says nothing about where the exact
+        // value sits relative to the eval).
         if (useCorrectionHistory && !inCheck && excludedMove == 0
+                && !Move.isCapture(localBest)
                 && Math.abs(bestScore) < MATE_IN_MAX) {
             boolean failHigh = bestScore >= beta;
             boolean failLow = bestScore <= origAlpha;
