@@ -100,10 +100,15 @@ def write_net(path, net: Net):
 
 
 def read_net(path) -> Net:
+    """bullet pads the whole saved file to a 64-byte boundary with filler bytes (observed:
+    the literal ASCII "bullet" repeated) -- up to 31 trailing shorts that are neither a
+    header nor real weights and must be tolerated, not treated as a parse error."""
     with open(path, "rb") as f:
         data = f.read()
     shorts = len(data) // 2
-    assert len(data) % 2 == 0 and (shorts - 1) % (INPUTS + 3) == 0, "not a valid raw net"
+    assert len(data) % 2 == 0, "odd-length file"
+    trailing = (shorts - 1) % (INPUTS + 3)
+    assert trailing < 32, f"not a valid raw net (unexplained remainder {trailing} shorts)"
     hidden = (shorts - 1) // (INPUTS + 3)
     off = 0
 

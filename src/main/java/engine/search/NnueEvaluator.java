@@ -52,13 +52,20 @@ import engine.board.Position;
  * {@code outWeights[2*hidden]} (STM half first), {@code outBias}. All {@code i16}. {@code hidden}
  * is inferred from the file length; QA/QB/SCALE are fixed to bullet's defaults. Requires
  * {@code hidden} a multiple of 32 so bullet's {@code align(64)} accumulator layout is
- * padding-free (256 satisfies this).
+ * padding-free (256 satisfies this). Bullet also pads the WHOLE file to a 64-byte boundary
+ * with filler bytes after {@code outBias} (observed: the literal ASCII "bullet" repeated) --
+ * up to 31 trailing shorts are tolerated as padding, not rejected as a parse error.
  *
- * <p><b>Correctness note.</b> The {@code ^56} flip, colour-swap and concat order are the bullet
- * convention but are only <i>proven</i> against a real trained net by the Java-vs-reference
- * cross-check ({@code NnueProbe} vs {@code nnue_ref.py} vs bullet's own eval). Internally,
- * {@code NnueSymmetryTest} pins self-consistency (mirror invariance) for any weights, catching
- * an index/flip/order bug without a trained net.
+ * <p><b>Correctness note.</b> The {@code ^56} flip, colour-swap and STM-first concat are no
+ * longer just the assumed canonical convention -- they are verified line-by-line against
+ * bullet's actual {@code Chess768::map_features} (in
+ * {@code crates/bullet_lib/src/game/inputs/chess768.rs}: {@code stm = [0,384][c] + 64*type + sq},
+ * {@code ntm = [384,0][c] + 64*type + (sq^56)}, where {@code c} is 1 for the non-mover after
+ * {@code bulletformat}'s own mover-relative canonicalization) and against
+ * {@code stm_hidden.concat(ntm_hidden)} in {@code examples/simple.rs}. Both reduce to exactly
+ * this class's formulas for every (mover, piece-colour) combination. {@code NnueSymmetryTest}
+ * additionally pins self-consistency (mirror invariance) for any weights, and
+ * {@code NnueCrossCheckTest} pins Java against the independent Python reference.
  */
 public final class NnueEvaluator implements Evaluator {
 
@@ -102,7 +109,10 @@ public final class NnueEvaluator implements Evaluator {
 
     /**
      * Reads bullet's raw saved format (header-less, little-endian i16). {@code hidden} is
-     * inferred from the byte count: total shorts = {@code 768*h + h + 2*h + 1 = 771*h + 1}.
+     * inferred from the byte count: total shorts = {@code 768*h + h + 2*h + 1 = 771*h + 1},
+     * PLUS bullet pads the whole file to a 64-byte boundary with filler bytes (observed:
+     * the literal ASCII "bullet" repeated) -- up to 31 trailing shorts (62 bytes) that are
+     * neither a header nor real weights and must be tolerated, not rejected.
      */
     public static Network load(InputStream in) throws IOException {
         byte[] all = in.readAllBytes();
@@ -110,8 +120,10 @@ public final class NnueEvaluator implements Evaluator {
             throw new IOException("NNUE: odd/empty file (" + all.length + " bytes)");
         }
         long shorts = all.length / 2L;
-        if ((shorts - 1) % (INPUTS + 3) != 0) {
-            throw new IOException("NNUE: " + all.length + " bytes is not a valid (768->N)x2->1 net");
+        long trailing = (shorts - 1) % (INPUTS + 3); // real data remainder, tolerating pad-to-64-byte filler
+        if (trailing >= 32) {
+            throw new IOException("NNUE: " + all.length + " bytes is not a valid (768->N)x2->1 net"
+                    + " (unexplained remainder " + trailing + " shorts)");
         }
         int hidden = (int) ((shorts - 1) / (INPUTS + 3)); // 768 + 1 (ftBias) + 2 (outW) per hidden
         if (hidden <= 0 || (hidden % 32) != 0) {
