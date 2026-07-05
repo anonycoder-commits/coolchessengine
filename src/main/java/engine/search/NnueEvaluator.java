@@ -5,6 +5,9 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
+import jdk.incubator.vector.ShortVector;
+import jdk.incubator.vector.VectorSpecies;
+
 import engine.board.Piece;
 import engine.board.Position;
 
@@ -75,6 +78,10 @@ public final class NnueEvaluator implements Evaluator {
     static final int QB = 64;
     static final int SCALE = 400;
 
+    // SIMD width for the feature-transformer accumulation (hidden is a multiple of 32, and every
+    // preferred short-species length -- 8/16/32 -- divides 32, so the loop bound is exact).
+    private static final VectorSpecies<Short> SP = ShortVector.SPECIES_PREFERRED;
+
     /** Immutable, thread-shareable parsed network. One instance is shared across workers. */
     public static final class Network {
         final int hidden, qa, qb, scale;
@@ -97,14 +104,16 @@ public final class NnueEvaluator implements Evaluator {
     }
 
     private final Network net;
-    // Per-instance scratch (one NnueEvaluator per worker thread -> no sharing races).
-    private final int[] accWhite;
-    private final int[] accBlack;
+    // Per-instance scratch (one NnueEvaluator per worker thread -> no sharing races). short[]
+    // (matching bullet's own i16 accumulator; values provably stay in range) so the hot refresh
+    // is a clean short[] += short[] loop the JIT auto-vectorizes, with no widening in the loop.
+    private final short[] accWhite;
+    private final short[] accBlack;
 
     public NnueEvaluator(Network net) {
         this.net = net;
-        this.accWhite = new int[net.hidden];
-        this.accBlack = new int[net.hidden];
+        this.accWhite = new short[net.hidden];
+        this.accBlack = new short[net.hidden];
     }
 
     /**
@@ -147,15 +156,12 @@ public final class NnueEvaluator implements Evaluator {
     public int evaluate(Position pos) {
         final int hidden = net.hidden;
         final short[] ftW = net.ftWeights;
-        final int[] w = accWhite;
-        final int[] b = accBlack;
+        final short[] w = accWhite;
+        final short[] b = accBlack;
 
         // Refresh both perspective accumulators from the bias, then add every piece's column.
-        final short[] ftBias = net.ftBias;
-        for (int i = 0; i < hidden; i++) {
-            w[i] = ftBias[i];
-            b[i] = ftBias[i];
-        }
+        System.arraycopy(net.ftBias, 0, w, 0, hidden);
+        System.arraycopy(net.ftBias, 0, b, 0, hidden);
 
         for (int p = 0; p < 12; p++) {
             long bb = pos.pieces(p);
@@ -171,7 +177,15 @@ public final class NnueEvaluator implements Evaluator {
                 bb &= bb - 1;
                 int wOff = (wBase + sq) * hidden;
                 int bOff = (bBase + (sq ^ 56)) * hidden;
-                for (int i = 0; i < hidden; i++) {
+                int bound = SP.loopBound(hidden);
+                int i = 0;
+                for (; i < bound; i += SP.length()) {
+                    ShortVector.fromArray(SP, w, i)
+                            .add(ShortVector.fromArray(SP, ftW, wOff + i)).intoArray(w, i);
+                    ShortVector.fromArray(SP, b, i)
+                            .add(ShortVector.fromArray(SP, ftW, bOff + i)).intoArray(b, i);
+                }
+                for (; i < hidden; i++) { // scalar tail (none when hidden % SP.length() == 0)
                     w[i] += ftW[wOff + i];
                     b[i] += ftW[bOff + i];
                 }
@@ -179,8 +193,8 @@ public final class NnueEvaluator implements Evaluator {
         }
 
         // Concatenate STM half first, SCReLU, dot with output weights -- bullet's exact staging.
-        int[] stm = pos.sideToMove() == Piece.WHITE ? w : b;
-        int[] nstm = pos.sideToMove() == Piece.WHITE ? b : w;
+        short[] stm = pos.sideToMove() == Piece.WHITE ? w : b;
+        short[] nstm = pos.sideToMove() == Piece.WHITE ? b : w;
         final short[] outW = net.outWeights;
         final int qa = net.qa;
         long out = 0;

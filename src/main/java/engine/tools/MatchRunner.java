@@ -518,8 +518,10 @@ public final class MatchRunner {
             ProcessBuilder pb = spec.startsWith("cp:")
                     // Direct java exec: no cmd.exe/.bat hop (that indirection roughly doubled
                     // process-spawn latency and, under concurrency, caused severe stalls --
-                    // see the class doc's referee-mode note).
-                    ? new ProcessBuilder(javaBin(), "-cp", spec.substring(3), "engine.uci.Uci")
+                    // see the class doc's referee-mode note). --add-modules is needed for the
+                    // NNUE SIMD path and harmless to the handcrafted eval (which never loads it).
+                    ? new ProcessBuilder(javaBin(), "--add-modules", "jdk.incubator.vector",
+                            "-cp", spec.substring(3), "engine.uci.Uci")
                     : new ProcessBuilder(spec);
             process = pb.redirectErrorStream(true).start();
             in = new PrintWriter(new OutputStreamWriter(process.getOutputStream()), true);

@@ -24,11 +24,21 @@ java {
 
 application {
     mainClass = 'engine.uci.Uci'
+    // NNUE SIMD uses the incubator Vector API; it must be resolved at run time too.
+    applicationDefaultJvmArgs = ['--add-modules', 'jdk.incubator.vector']
+}
+
+// jdk.incubator.vector (SIMD NNUE inference) must be added at compile and run time.
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
 }
 
 jar {
     manifest {
         attributes 'Main-Class': 'engine.uci.Uci'
+        // Launch must still pass --add-modules jdk.incubator.vector on the java command line
+        // (manifests can't request incubator modules). Only needed when UseNNUE is enabled;
+        // the handcrafted-eval path never loads the Vector API classes.
     }
 }
 
@@ -45,6 +55,7 @@ jar.finalizedBy copyToLichessBot
 
 test {
     useJUnitPlatform()
+    jvmArgs += ['--add-modules', 'jdk.incubator.vector']
     maxHeapSize = '2g'
     testLogging {
         events 'passed', 'failed', 'skipped'
