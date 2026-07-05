@@ -1,0 +1,8 @@
+# Small smoke-test EPD for engine.tools.Epd. NOT a real suite -- just a handful of
+# unambiguous tactics/mates to confirm the runner parses, searches, and scores.
+# Full suites to download separately (both freely available):
+#   Win At Chess (WAC, 300 tactical positions)
+#   Strategic Test Suite (STS, 1500 positional positions, 15 themed files)
+2rr3k/pp3pp1/1nnqbN1p/3pN3/2pP4/2P3Q1/PPB4P/R4RK1 w - - bm Qg6; id "WAC.001";
+6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - bm Ra8; id "smoke.backrank-M1";
+6k1/5ppp/8/8/8/8/8/1Q4K1 w - - bm Qb8; id "smoke.qmate-M1";

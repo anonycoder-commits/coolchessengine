@@ -27,6 +27,7 @@ lichess-bot/.venv/
 *.csv
 *.pgn
 *.epd
+!tools/epd/*.epd
 *.bin
 *.dat
 *.db
