@@ -49,15 +49,25 @@ public final class Bench {
         "1k6/1P6/2K5/8/8/8/8/4R3 w - - 0 1",                                    // Lucena
     };
 
-    /** Runs the bench and prints per-position lines plus the summary signature line. */
+    /** Runs the bench at {@link #BENCH_DEPTH} and prints per-position lines plus the
+     *  summary signature line. This is the regression-gate entry point -- the signature
+     *  it prints must stay byte-identical across pure refactors/speedups. */
     public static void run() {
+        run(BENCH_DEPTH);
+    }
+
+    /** Runs the bench at an arbitrary depth. Only {@code run()} (depth {@link #BENCH_DEPTH})
+     *  is the pinned signature; a deeper run exists solely to give a profiler (see the JFR
+     *  recipe in this class's javadoc) enough wall-clock time to collect useful samples,
+     *  and its summary line is deliberately NOT a stability-gated signature. */
+    public static void run(int depth) {
         long totalNodes = 0;
         long startNanos = System.nanoTime();
         for (int i = 0; i < FENS.length; i++) {
             Position pos = Position.fromFen(FENS[i]);
             Search search = new Search(new HandcraftedEvaluator(), BENCH_HASH_MB);
             search.printInfo = false;
-            search.think(pos, SearchLimits.depth(BENCH_DEPTH));
+            search.think(pos, SearchLimits.depth(depth));
             long nodes = search.nodes();
             totalNodes += nodes;
             System.out.println("position " + (i + 1) + "/" + FENS.length
@@ -70,7 +80,25 @@ public final class Bench {
         System.out.println("bench: " + totalNodes + " nodes " + ms + " ms " + nps + " nps");
     }
 
+    /**
+     * Optional first arg: search depth (default {@link #BENCH_DEPTH}, the pinned signature
+     * depth). Everything below depth-10's own comparison is about giving a profiler enough
+     * samples, not about changing what the gate checks.
+     *
+     * <p><b>JFR profiling recipe</b> (no profiler was wired into this project before): run a
+     * depth well past {@link #BENCH_DEPTH} so the whole bench takes tens of seconds instead
+     * of ~1, e.g.:
+     * <pre>
+     * java -XX:+FlightRecorder \
+     *      -XX:StartFlightRecording=filename=bench.jfr,settings=profile \
+     *      -cp build/classes/java/main engine.tools.Bench 16
+     * </pre>
+     * Then inspect {@code bench.jfr} with JDK Mission Control (or
+     * {@code jfr print --events jdk.ExecutionSample bench.jfr} for a quick CLI summary) to
+     * see where wall-clock time actually goes -- Evaluator terms, move generation, TT
+     * probes, etc. -- before picking an optimization to implement.
+     */
     public static void main(String[] args) {
-        run();
+        run(args.length > 0 ? Integer.parseInt(args[0]) : BENCH_DEPTH);
     }
 }
