@@ -148,7 +148,7 @@ jobs:
           echo "Shard $IDX: $MY_GAMES games, seed base $SEED"
           java -cp classes engine.tools.DataGen \
             -out shard-$IDX.txt -games "$MY_GAMES" -depth ${{ needs.config.outputs.depth }} \
-            -random ${{ needs.config.outputs.random_plies }} -concurrency 2 -seed "$SEED"
+            -random ${{ needs.config.outputs.random_plies }} -concurrency 4 -seed "$SEED"
       - name: Upload shard output
         if: steps.check.outputs.skip == 'false'
         uses: actions/upload-artifact@v4
