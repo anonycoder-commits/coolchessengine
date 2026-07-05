@@ -5,18 +5,16 @@ name: NNUE self-play data generation
 # training file -- the same sharding pattern self-play-gate.yml uses for gates, applied to data
 # generation instead. Public repo => these runs consume no billed Actions minutes.
 #
-# Two triggers:
-#   - workflow_dispatch: manual, fully configurable via the "Run workflow" form.
-#   - schedule: fires automatically (see cron below) with no form to fill in, so it uses the
-#     hardcoded defaults in the `config` job below instead. GitHub only reads `schedule`
-#     triggers from the DEFAULT BRANCH's copy of this file (not whatever `ref` is checked out
-#     inside the job), so this file must be kept in sync on main whenever it changes here.
-#   Each run's artifacts (per-shard + combined) are independent per GitHub Actions run; running
-#   this repeatedly accumulates SEPARATE selfplay-combined artifacts to download and merge, not
-#   one growing file.
+# Manual only (workflow_dispatch): dispatch deliberately via the "Run workflow" form. A prior
+# revision added a `schedule:` (cron) trigger for automatic recurring runs, but heavy sustained
+# compute like this isn't really what shared CI runners are for, so it was removed -- dispatch
+# by hand when you actually want a batch. The `config` job below still resolves inputs with
+# fallback defaults (harmless leftover from supporting both trigger types; costs nothing to keep
+# and makes it trivial to re-add a schedule later if that changes).
 #
-# To stop the recurring runs later: delete/comment out the `schedule:` block below (on main) or
-# disable this workflow from the repo's Actions tab.
+# Each run's artifacts (per-shard + combined) are independent per GitHub Actions run; running
+# this repeatedly accumulates SEPARATE selfplay-combined artifacts to download and merge, not
+# one growing file.
 
 on:
   workflow_dispatch:
@@ -43,10 +41,6 @@ on:
         default: "12"
         type: choice
         options: ["1", "2", "3", "4", "6", "8", "12", "16", "20"]
-  schedule:
-    # Every 6 hours. A new run starting before the previous one finishes is harmless (both just
-    # run independently) -- there's no shared state between runs, only shared, free CI capacity.
-    - cron: "0 */6 * * *"
 
 jobs:
   # Resolves one shared config regardless of trigger: workflow_dispatch's `inputs` context is
