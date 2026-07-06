@@ -52,8 +52,10 @@ import engine.board.Position;
  *
  * <h2>File format (bullet raw {@code SavedFormat} dump, little-endian, no header)</h2>
  * {@code ftWeights[768*hidden]} (feature-major), {@code ftBias[hidden]},
- * {@code outWeights[2*hidden]} (STM half first), {@code outBias}. All {@code i16}. {@code hidden}
- * is inferred from the file length; QA/QB/SCALE are fixed to bullet's defaults. Requires
+ * {@code outWeights[buckets*2*hidden]} (bucket-major; within a bucket STM half first),
+ * {@code outBias[buckets]}. All {@code i16}. {@code hidden} and the material-output-bucket count
+ * (1 = original single-output net, 8 = bullet {@code MaterialCount<8>}) are inferred from the
+ * file length; QA/QB/SCALE are fixed to bullet's defaults. Requires
  * {@code hidden} a multiple of 32 so bullet's {@code align(64)} accumulator layout is
  * padding-free (256 satisfies this). Bullet also pads the WHOLE file to a 64-byte boundary
  * with filler bytes after {@code outBias} (observed: the literal ASCII "bullet" repeated) --
@@ -82,17 +84,23 @@ public final class NnueEvaluator implements Evaluator {
     // preferred short-species length -- 8/16/32 -- divides 32, so the loop bound is exact).
     private static final VectorSpecies<Short> SP = ShortVector.SPECIES_PREFERRED;
 
+    // Output-bucket counts this loader understands. B=1 is the original single-output net;
+    // B=8 is the material-bucketed net (bullet MaterialCount<8>). The file is header-less, so
+    // the count is detected from the file size like `hidden` is.
+    private static final int[] SUPPORTED_BUCKETS = {1, 8};
+
     /** Immutable, thread-shareable parsed network. One instance is shared across workers. */
     public static final class Network {
-        final int hidden, qa, qb, scale;
+        final int hidden, buckets, qa, qb, scale;
         final short[] ftWeights; // [feature*hidden + i], feature-major (0..INPUTS-1)
         final short[] ftBias;    // [hidden]
-        final short[] outWeights;// [2*hidden], STM half first
-        final int outBias;       // scaled QA*QB
+        final short[] outWeights;// [buckets * 2*hidden], bucket-major; within a bucket STM half first
+        final int[] outBias;     // [buckets], scaled QA*QB
 
-        Network(int hidden, int qa, int qb, int scale,
-                short[] ftWeights, short[] ftBias, short[] outWeights, int outBias) {
+        Network(int hidden, int buckets, int qa, int qb, int scale,
+                short[] ftWeights, short[] ftBias, short[] outWeights, int[] outBias) {
             this.hidden = hidden;
+            this.buckets = buckets;
             this.qa = qa;
             this.qb = qb;
             this.scale = scale;
@@ -117,11 +125,14 @@ public final class NnueEvaluator implements Evaluator {
     }
 
     /**
-     * Reads bullet's raw saved format (header-less, little-endian i16). {@code hidden} is
-     * inferred from the byte count: total shorts = {@code 768*h + h + 2*h + 1 = 771*h + 1},
-     * PLUS bullet pads the whole file to a 64-byte boundary with filler bytes (observed:
-     * the literal ASCII "bullet" repeated) -- up to 31 trailing shorts (62 bytes) that are
-     * neither a header nor real weights and must be tolerated, not rejected.
+     * Reads bullet's raw saved format (header-less, little-endian i16). {@code hidden} and the
+     * output-bucket count {@code B} are inferred from the byte count: total shorts =
+     * {@code 768*h + h + B*2*h + B = h*(769+2B) + B} for some supported {@code B}, PLUS bullet
+     * pads the whole file to a 64-byte boundary with filler bytes (observed: the literal ASCII
+     * "bullet" repeated) -- up to 31 trailing shorts (62 bytes) that are neither a header nor
+     * real weights and must be tolerated, not rejected. For B&gt;1 the output weights are saved
+     * TRANSPOSED (bullet {@code SavedFormat.transpose()}), i.e. bucket-major with each bucket's
+     * {@code 2*h} weights contiguous -- which is exactly the layout inference indexes into.
      */
     public static Network load(InputStream in) throws IOException {
         byte[] all = in.readAllBytes();
@@ -129,21 +140,33 @@ public final class NnueEvaluator implements Evaluator {
             throw new IOException("NNUE: odd/empty file (" + all.length + " bytes)");
         }
         long shorts = all.length / 2L;
-        long trailing = (shorts - 1) % (INPUTS + 3); // real data remainder, tolerating pad-to-64-byte filler
-        if (trailing >= 32) {
-            throw new IOException("NNUE: " + all.length + " bytes is not a valid (768->N)x2->1 net"
-                    + " (unexplained remainder " + trailing + " shorts)");
+        int hidden = 0, buckets = 0;
+        for (int b : SUPPORTED_BUCKETS) {
+            long body = shorts - b;              // shorts minus the B outBias values
+            long perHidden = INPUTS + 1 + 2L * b; // ftW + ftBias + outW shorts per hidden unit
+            if (body <= 0) continue;
+            long h = body / perHidden;
+            long trailing = body % perHidden;    // tolerating pad-to-64-byte filler
+            if (trailing < 32 && h > 0 && (h % 32) == 0) {
+                if (hidden != 0) {
+                    throw new IOException("NNUE: " + all.length + " bytes is ambiguous between "
+                            + buckets + " and " + b + " output buckets -- refusing to guess");
+                }
+                hidden = (int) h;
+                buckets = b;
+            }
         }
-        int hidden = (int) ((shorts - 1) / (INPUTS + 3)); // 768 + 1 (ftBias) + 2 (outW) per hidden
-        if (hidden <= 0 || (hidden % 32) != 0) {
-            throw new IOException("NNUE: hidden=" + hidden + " must be a positive multiple of 32");
+        if (hidden == 0) {
+            throw new IOException("NNUE: " + all.length + " bytes is not a valid (768->N)x2->B net"
+                    + " for any supported bucket count (hidden must be a positive multiple of 32)");
         }
         ByteBuffer buf = ByteBuffer.wrap(all).order(ByteOrder.LITTLE_ENDIAN);
         short[] ftWeights = readShorts(buf, INPUTS * hidden);
         short[] ftBias = readShorts(buf, hidden);
-        short[] outWeights = readShorts(buf, 2 * hidden);
-        int outBias = buf.getShort();
-        return new Network(hidden, QA, QB, SCALE, ftWeights, ftBias, outWeights, outBias);
+        short[] outWeights = readShorts(buf, buckets * 2 * hidden);
+        int[] outBias = new int[buckets];
+        for (int i = 0; i < buckets; i++) outBias[i] = buf.getShort();
+        return new Network(hidden, buckets, QA, QB, SCALE, ftWeights, ftBias, outWeights, outBias);
     }
 
     private static short[] readShorts(ByteBuffer buf, int n) {
@@ -192,20 +215,34 @@ public final class NnueEvaluator implements Evaluator {
             }
         }
 
-        // Concatenate STM half first, SCReLU, dot with output weights -- bullet's exact staging.
+        // Material output bucket (bullet MaterialCount<B>): (pieces-2) / ceil(32/B), so with B=8
+        // each bucket spans 4 piece-counts. Clamped defensively for kingless test positions; any
+        // legal position (2..32 pieces) lands in range on its own. B=1 always selects bucket 0.
+        final int bucket;
+        if (net.buckets == 1) {
+            bucket = 0;
+        } else {
+            int divisor = (32 + net.buckets - 1) / net.buckets;
+            int raw = (Long.bitCount(pos.occupied()) - 2) / divisor;
+            bucket = Math.max(0, Math.min(net.buckets - 1, raw));
+        }
+        final int outOff = bucket * 2 * hidden;
+
+        // Concatenate STM half first, SCReLU, dot with the bucket's output weights -- bullet's
+        // exact staging.
         short[] stm = pos.sideToMove() == Piece.WHITE ? w : b;
         short[] nstm = pos.sideToMove() == Piece.WHITE ? b : w;
         final short[] outW = net.outWeights;
         final int qa = net.qa;
         long out = 0;
         for (int i = 0; i < hidden; i++) {
-            out += (long) screlu(stm[i], qa) * outW[i];
+            out += (long) screlu(stm[i], qa) * outW[outOff + i];
         }
         for (int i = 0; i < hidden; i++) {
-            out += (long) screlu(nstm[i], qa) * outW[hidden + i];
+            out += (long) screlu(nstm[i], qa) * outW[outOff + hidden + i];
         }
         out /= qa;                       // QA*QA*QB -> QA*QB
-        out += net.outBias;              // QA*QB
+        out += net.outBias[bucket];      // QA*QB
         out *= net.scale;
         out /= (long) qa * net.qb;       // -> centipawns (truncates toward zero)
 

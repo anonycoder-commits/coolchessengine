@@ -30,18 +30,32 @@ class NnueCrossCheckTest {
 
     @Test
     void javaMatchesPythonReference() throws Exception {
+        crossCheck("/nnue/fixture_net.bin", "/nnue/fixture_golden.txt", 1);
+    }
+
+    /** Same pin for the material-output-bucketed format (bullet MaterialCount&lt;8&gt;): the
+     *  fixture FENs span 2..32 pieces, so bucket selection and the bucket-major output-weight
+     *  layout are both exercised, not just bucket 0. */
+    @Test
+    void javaMatchesPythonReferenceWithOutputBuckets() throws Exception {
+        crossCheck("/nnue/fixture_net_b8.bin", "/nnue/fixture_golden_b8.txt", 8);
+    }
+
+    private void crossCheck(String netResource, String goldenResource, int expectedBuckets)
+            throws Exception {
         NnueEvaluator.Network net;
-        try (InputStream in = getClass().getResourceAsStream("/nnue/fixture_net.bin")) {
-            assertNotNull(in, "fixture_net.bin missing from test resources");
+        try (InputStream in = getClass().getResourceAsStream(netResource)) {
+            assertNotNull(in, netResource + " missing from test resources");
             net = NnueEvaluator.load(in);
         }
+        assertEquals(expectedBuckets, net.buckets, "bucket count mis-detected from file size");
         NnueEvaluator eval = new NnueEvaluator(net);
 
         List<String> fens = new ArrayList<>();
         List<Integer> expected = new ArrayList<>();
-        try (InputStream in = getClass().getResourceAsStream("/nnue/fixture_golden.txt");
+        try (InputStream in = getClass().getResourceAsStream(goldenResource);
              BufferedReader r = new BufferedReader(new InputStreamReader(
-                     assertNotNull(in, "fixture_golden.txt missing"), StandardCharsets.UTF_8))) {
+                     assertNotNull(in, goldenResource + " missing"), StandardCharsets.UTF_8))) {
             String line;
             while ((line = r.readLine()) != null) {
                 if (line.isBlank()) continue;

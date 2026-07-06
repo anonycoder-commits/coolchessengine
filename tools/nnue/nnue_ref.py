@@ -12,9 +12,12 @@ Two roles:
     REAL trained net against both this reference AND bullet's own output (Phase 2).
 
 Weights format = bullet's raw SavedFormat dump (little-endian i16, NO header): ftWeights
-[768*hidden] (feature-major), ftBias[hidden], outWeights[2*hidden] (STM half first), outBias.
-`hidden` is inferred from the file length. Activation is SCReLU and the inference arithmetic is
-staged exactly as bullet's `Network::evaluate` (matches engine.search.NnueEvaluator).
+[768*hidden] (feature-major), ftBias[hidden], outWeights[buckets*2*hidden] (bucket-major --
+bullet saves l1w transposed for bucketed nets -- STM half first within a bucket),
+outBias[buckets]. `hidden` and the material-output-bucket count (1 = original single-output,
+8 = bullet MaterialCount<8>) are inferred from the file length. Bucket selection matches
+bullet: (piece_count - 2) // ceil(32 / buckets). Activation is SCReLU and the inference
+arithmetic is staged exactly as bullet's `Network::evaluate` (matches engine.search.NnueEvaluator).
 """
 import argparse
 import struct
@@ -22,6 +25,7 @@ import sys
 
 INPUTS = 768
 QA, QB, SCALE = 255, 64, 400  # bullet simple.rs defaults (no header carries them)
+SUPPORTED_BUCKETS = (1, 8)    # 1 = original single-output net, 8 = MaterialCount<8>
 
 PIECE_FROM_CHAR = {  # -> engine piece index color*6+type (P N B R Q K)
     'P': 0, 'N': 1, 'B': 2, 'R': 3, 'Q': 4, 'K': 5,
@@ -57,9 +61,10 @@ def parse_fen(fen: str):
 
 
 class Net:
-    def __init__(self, hidden, qa, qb, scale, ftw, ftb, outw, outb):
-        self.hidden, self.qa, self.qb, self.scale = hidden, qa, qb, scale
-        self.ftw, self.ftb, self.outw, self.outb = ftw, ftb, outw, outb
+    def __init__(self, hidden, buckets, qa, qb, scale, ftw, ftb, outw, outb):
+        self.hidden, self.buckets = hidden, buckets
+        self.qa, self.qb, self.scale = qa, qb, scale
+        self.ftw, self.ftb, self.outw, self.outb = ftw, ftb, outw, outb  # outb: list[buckets]
 
     def evaluate(self, fen: str) -> int:
         h = self.hidden
@@ -74,14 +79,22 @@ class Net:
             for i in range(h):
                 w[i] += self.ftw[wo + i]
                 b[i] += self.ftw[bo + i]
+        # Material bucket (bullet MaterialCount<B>), clamped like the Java side for kingless
+        # test positions; any legal position lands in range on its own.
+        if self.buckets == 1:
+            bucket = 0
+        else:
+            divisor = -(-32 // self.buckets)  # ceil(32 / B)
+            bucket = max(0, min(self.buckets - 1, (len(pieces) - 2) // divisor))
+        off = bucket * 2 * h
         acc_stm, acc_nstm = (w, b) if stm == 0 else (b, w)
         out = 0
         for i in range(h):
-            out += _screlu(acc_stm[i], self.qa) * self.outw[i]
+            out += _screlu(acc_stm[i], self.qa) * self.outw[off + i]
         for i in range(h):
-            out += _screlu(acc_nstm[i], self.qa) * self.outw[h + i]
+            out += _screlu(acc_nstm[i], self.qa) * self.outw[off + h + i]
         out = trunc_div(out, self.qa)     # QA*QA*QB -> QA*QB
-        out += self.outb                  # QA*QB
+        out += self.outb[bucket]          # QA*QB
         out *= self.scale
         return trunc_div(out, self.qa * self.qb)
 
@@ -96,20 +109,31 @@ def write_net(path, net: Net):
         f.write(struct.pack(f"<{len(net.ftw)}h", *net.ftw))
         f.write(struct.pack(f"<{len(net.ftb)}h", *net.ftb))
         f.write(struct.pack(f"<{len(net.outw)}h", *net.outw))
-        f.write(struct.pack("<h", net.outb))
+        f.write(struct.pack(f"<{len(net.outb)}h", *net.outb))
 
 
 def read_net(path) -> Net:
     """bullet pads the whole saved file to a 64-byte boundary with filler bytes (observed:
     the literal ASCII "bullet" repeated) -- up to 31 trailing shorts that are neither a
-    header nor real weights and must be tolerated, not treated as a parse error."""
+    header nor real weights and must be tolerated, not treated as a parse error.
+
+    total shorts = hidden*(769 + 2*B) + B (+ padding) for some supported bucket count B;
+    both `hidden` and B are inferred, mirroring NnueEvaluator.load exactly."""
     with open(path, "rb") as f:
         data = f.read()
     shorts = len(data) // 2
     assert len(data) % 2 == 0, "odd-length file"
-    trailing = (shorts - 1) % (INPUTS + 3)
-    assert trailing < 32, f"not a valid raw net (unexplained remainder {trailing} shorts)"
-    hidden = (shorts - 1) // (INPUTS + 3)
+    hidden = buckets = 0
+    for b in SUPPORTED_BUCKETS:
+        body = shorts - b
+        per_hidden = INPUTS + 1 + 2 * b
+        if body <= 0:
+            continue
+        h, trailing = divmod(body, per_hidden)
+        if trailing < 32 and h > 0 and h % 32 == 0:
+            assert hidden == 0, f"ambiguous between {buckets} and {b} buckets"
+            hidden, buckets = h, b
+    assert hidden, "not a valid raw net for any supported bucket count"
     off = 0
 
     def take(n):
@@ -120,9 +144,9 @@ def read_net(path) -> Net:
 
     ftw = take(INPUTS * hidden)
     ftb = take(hidden)
-    outw = take(2 * hidden)
-    outb = take(1)[0]
-    return Net(hidden, QA, QB, SCALE, ftw, ftb, outw, outb)
+    outw = take(buckets * 2 * hidden)
+    outb = take(buckets)
+    return Net(hidden, buckets, QA, QB, SCALE, ftw, ftb, outw, outb)
 
 
 # Positions covering both sides to move, castling, en passant, and lopsided material.
@@ -142,23 +166,24 @@ FIXTURE_FENS = [
 ]
 
 
-def gen_fixture(net_path, golden_path, hidden=32, seed=1234):
+def gen_fixture(net_path, golden_path, hidden=32, seed=1234, buckets=1):
     """Deterministic small net (hidden a multiple of 32, like a real net) so the committed
     fixture stays tiny (~49 KB) and reproducible."""
     import random
     rng = random.Random(seed)
     ftw = [rng.randint(-64, 64) for _ in range(INPUTS * hidden)]
     ftb = [rng.randint(-128, 128) for _ in range(hidden)]
-    outw = [rng.randint(-64, 64) for _ in range(2 * hidden)]
-    outb = rng.randint(-2000, 2000)
-    net = Net(hidden, QA, QB, SCALE, ftw, ftb, outw, outb)
+    outw = [rng.randint(-64, 64) for _ in range(buckets * 2 * hidden)]
+    outb = [rng.randint(-2000, 2000) for _ in range(buckets)]
+    net = Net(hidden, buckets, QA, QB, SCALE, ftw, ftb, outw, outb)
     write_net(net_path, net)
     # round-trip through the file so the golden reflects exactly what a loader will parse
     net = read_net(net_path)
+    assert net.buckets == buckets, "fixture round-trip mis-detected the bucket count"
     with open(golden_path, "w", encoding="utf-8", newline="\n") as g:
         for fen in FIXTURE_FENS:
             g.write(f"{net.evaluate(fen)}\t{fen}\n")
-    print(f"wrote {net_path} (hidden={hidden}) and {golden_path} "
+    print(f"wrote {net_path} (hidden={hidden}, buckets={buckets}) and {golden_path} "
           f"({len(FIXTURE_FENS)} positions)", file=sys.stderr)
 
 
@@ -167,11 +192,13 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gen-fixture", nargs=2, metavar=("NET", "GOLDEN"),
                     help="write a seeded fixture net + golden evals")
+    ap.add_argument("--buckets", type=int, default=1, choices=SUPPORTED_BUCKETS,
+                    help="output-bucket count for --gen-fixture (default 1)")
     ap.add_argument("--eval", metavar="NET", help="eval FENs from stdin against NET")
     args = ap.parse_args()
 
     if args.gen_fixture:
-        gen_fixture(args.gen_fixture[0], args.gen_fixture[1])
+        gen_fixture(args.gen_fixture[0], args.gen_fixture[1], buckets=args.buckets)
         return 0
     if args.eval:
         net = read_net(args.eval)

@@ -36,11 +36,24 @@ class NnueSymmetryTest {
 
     @Test
     void mirrorInvariant() {
-        NnueEvaluator eval = new NnueEvaluator(randomNet(20260705, 32));
+        NnueEvaluator eval = new NnueEvaluator(randomNet(20260705, 32, 1));
         for (String fen : FENS) {
             int e = eval.evaluate(Position.fromFen(fen));
             int em = eval.evaluate(Position.fromFen(mirror(fen)));
             assertEquals(e, em, "NNUE eval not mirror-invariant for: " + fen);
+        }
+    }
+
+    /** Same invariance for a material-bucketed net: the mirror preserves the piece count, so
+     *  both sides of the comparison select the same bucket -- catching a bucket-offset bug on
+     *  top of the indexing bugs the single-output test pins. */
+    @Test
+    void mirrorInvariantWithOutputBuckets() {
+        NnueEvaluator eval = new NnueEvaluator(randomNet(20260706, 32, 8));
+        for (String fen : FENS) {
+            int e = eval.evaluate(Position.fromFen(fen));
+            int em = eval.evaluate(Position.fromFen(mirror(fen)));
+            assertEquals(e, em, "bucketed NNUE eval not mirror-invariant for: " + fen);
         }
     }
 
@@ -65,15 +78,16 @@ class NnueSymmetryTest {
     }
 
     /** Seeded net with values wide enough that clipped ReLU both clips and passes. */
-    private static NnueEvaluator.Network randomNet(long seed, int hidden) {
+    private static NnueEvaluator.Network randomNet(long seed, int hidden, int buckets) {
         Random rng = new Random(seed);
         short[] ftw = new short[NnueEvaluator.INPUTS * hidden];
         for (int i = 0; i < ftw.length; i++) ftw[i] = (short) (rng.nextInt(129) - 64);
         short[] ftb = new short[hidden];
         for (int i = 0; i < ftb.length; i++) ftb[i] = (short) (rng.nextInt(257) - 128);
-        short[] outw = new short[2 * hidden];
+        short[] outw = new short[buckets * 2 * hidden];
         for (int i = 0; i < outw.length; i++) outw[i] = (short) (rng.nextInt(129) - 64);
-        int outb = rng.nextInt(4001) - 2000;
-        return new NnueEvaluator.Network(hidden, 255, 64, 400, ftw, ftb, outw, outb);
+        int[] outb = new int[buckets];
+        for (int i = 0; i < outb.length; i++) outb[i] = rng.nextInt(4001) - 2000;
+        return new NnueEvaluator.Network(hidden, buckets, 255, 64, 400, ftw, ftb, outw, outb);
     }
 }

@@ -63,23 +63,28 @@ stays the default eval.
 |-----------|-------|-------|
 | 768·N | ftWeights (`l0w`) | feature-major `[feature*N + i]`, scale QA=255 |
 | N | ftBias (`l0b`) | scale QA |
-| 2·N | outWeights (`l1w`) | **STM half first**, then non-STM, scale QB=64 |
-| 1 | outBias (`l1b`) | scale QA·QB |
+| B·2·N | outWeights (`l1w`) | **bucket-major** (bullet saves `l1w` transposed when B>1); within a bucket STM half first, then non-STM, scale QB=64 |
+| B | outBias (`l1b`) | scale QA·QB |
 
-`N` (hidden) is inferred from the file length (`shorts = 771·N + 1`); QA/QB/SCALE=400 are fixed
-to bullet's defaults. `N` must be a multiple of 32 (256 works) so bullet's `align(64)`
-accumulator layout is padding-free. Inference (matching bullet `Network::evaluate`): SCReLU
-`clamp(acc,0,QA)^2`, then staged `out /= QA; out += bias; out *= SCALE; out /= QA*QB`.
+`N` (hidden) and `B` (material output buckets: 1 = original single-output net, 8 = bullet
+`MaterialCount<8>`) are both inferred from the file length (`shorts = N·(769+2B) + B`);
+QA/QB/SCALE=400 are fixed to bullet's defaults. `N` must be a multiple of 32 (256 works) so
+bullet's `align(64)` accumulator layout is padding-free. Bucket selection (matching bullet):
+`(piece_count - 2) / ceil(32/B)` — with B=8 each bucket covers 4 piece-counts. Inference
+(matching bullet `Network::evaluate`): SCReLU `clamp(acc,0,QA)^2`, then staged
+`out /= QA; out += bias[bucket]; out *= SCALE; out /= QA*QB`.
 
 Feature index for a piece (engine index `p` = `color*6+type`, square `sq`, a1=0):
 white-perspective `p*64 + sq`; black-perspective `((color^1)*6+type)*64 + (sq^56)`.
 
 ### Verification (all green, run `./gradlew test --tests "engine.search.Nnue*"`)
 
-- **`NnueCrossCheckTest`** — Java == the Python reference (`nnue_ref.py`) on a committed seeded
-  fixture net (`src/test/resources/nnue/fixture_net.bin` + `fixture_golden.txt`). Catches any
-  index/quant/perspective transcription bug. Regenerate with
-  `python nnue_ref.py --gen-fixture <net> <golden>`.
+- **`NnueCrossCheckTest`** — Java == the Python reference (`nnue_ref.py`) on committed seeded
+  fixture nets: single-output (`src/test/resources/nnue/fixture_net.bin` + `fixture_golden.txt`)
+  and 8-bucket (`fixture_net_b8.bin` + `fixture_golden_b8.txt`; the fixture FENs span 2..32
+  pieces so all bucket arithmetic is exercised). Catches any index/quant/perspective/bucket
+  transcription bug. Regenerate with
+  `python nnue_ref.py --gen-fixture <net> <golden> [--buckets 8]`.
 - **`NnueSymmetryTest`** — reference-free: a perspective net is invariant under the full mirror
   (flip + colour-swap + stm-swap), so `eval(pos) == eval(mirror)` exactly for any weights.
   This is what pins the `^56` flip and STM-first concat without a trained net.
