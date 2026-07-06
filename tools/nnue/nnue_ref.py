@@ -12,11 +12,13 @@ Two roles:
     REAL trained net against both this reference AND bullet's own output (Phase 2).
 
 Weights format = bullet's raw SavedFormat dump (little-endian i16, NO header): ftWeights
-[768*hidden] (feature-major), ftBias[hidden], outWeights[buckets*2*hidden] (bucket-major --
-bullet saves l1w transposed for bucketed nets -- STM half first within a bucket),
-outBias[buckets]. `hidden` and the material-output-bucket count (1 = original single-output,
-8 = bullet MaterialCount<8>) are inferred from the file length. Bucket selection matches
-bullet: (piece_count - 2) // ceil(32 / buckets). Activation is SCReLU and the inference
+[king_buckets*768*hidden] (feature-major), ftBias[hidden], outWeights[buckets*2*hidden]
+(bucket-major -- bullet saves l1w transposed for bucketed nets -- STM half first within a
+bucket), outBias[buckets]. `hidden`, the king-input-bucket count (1 = plain Chess768, 10 =
+mirrored ChessBucketsMirrored layout below) and the material-output-bucket count (1 = original
+single-output, 8 = bullet MaterialCount<8>) are all inferred from the file length. Output
+bucket selection matches bullet: (piece_count - 2) // ceil(32 / buckets); king bucket/mirror
+selection is per perspective from its own king square. Activation is SCReLU and the inference
 arithmetic is staged exactly as bullet's `Network::evaluate` (matches engine.search.NnueEvaluator).
 """
 import argparse
@@ -26,6 +28,27 @@ import sys
 INPUTS = 768
 QA, QB, SCALE = 255, 64, 400  # bullet simple.rs defaults (no header carries them)
 SUPPORTED_BUCKETS = (1, 8)    # 1 = original single-output net, 8 = MaterialCount<8>
+# (kingBuckets, outputBuckets) pairs = every net generation trained; must mirror
+# NnueEvaluator.SUPPORTED_FORMATS
+SUPPORTED_FORMATS = ((1, 1), (1, 8), (10, 8))
+
+# 10-bucket mirrored king layout (bullet ChessBucketsMirrored): 32 entries covering files a-d
+# from each perspective's own orientation (entry = rank*4 + file, rank 0 = own back rank); kings
+# on files e-h use the mirrored entry with feature squares flipped (^7). Must match simple.rs
+# and NnueEvaluator.KING_BUCKET_LAYOUT_32 exactly.
+KING_BUCKET_LAYOUT_32 = [
+    0, 1, 2, 3,
+    4, 4, 5, 5,
+    6, 6, 6, 6,
+    7, 7, 7, 7,
+    8, 8, 8, 8,
+    8, 8, 8, 8,
+    9, 9, 9, 9,
+    9, 9, 9, 9,
+]
+_FILE_FOLD = [0, 1, 2, 3, 3, 2, 1, 0]
+KING_BUCKET_OF_SQUARE = [KING_BUCKET_LAYOUT_32[(sq // 8) * 4 + _FILE_FOLD[sq % 8]]
+                         for sq in range(64)]
 
 PIECE_FROM_CHAR = {  # -> engine piece index color*6+type (P N B R Q K)
     'P': 0, 'N': 1, 'B': 2, 'R': 3, 'Q': 4, 'K': 5,
@@ -61,20 +84,32 @@ def parse_fen(fen: str):
 
 
 class Net:
-    def __init__(self, hidden, buckets, qa, qb, scale, ftw, ftb, outw, outb):
-        self.hidden, self.buckets = hidden, buckets
+    def __init__(self, hidden, king_buckets, buckets, qa, qb, scale, ftw, ftb, outw, outb):
+        self.hidden, self.king_buckets, self.buckets = hidden, king_buckets, buckets
         self.qa, self.qb, self.scale = qa, qb, scale
         self.ftw, self.ftb, self.outw, self.outb = ftw, ftb, outw, outb  # outb: list[buckets]
 
     def evaluate(self, fen: str) -> int:
         h = self.hidden
         pieces, stm = parse_fen(fen)
+        # King input bucket + horizontal mirror per perspective (ChessBucketsMirrored): each
+        # side's own king square (black's viewed ^56) selects the feature-weight set; a king on
+        # files e-h uses the mirrored bucket with every feature square flipped (^7). For
+        # king_buckets == 1 (legacy Chess768) base and flip are zero -> original formulas.
+        w_flip = b_flip = w_bucket = b_bucket = 0
+        if self.king_buckets > 1:
+            w_ksq = next(sq for p, sq in pieces if p == 5)
+            b_ksq = next(sq for p, sq in pieces if p == 11) ^ 56
+            w_flip = 7 if (w_ksq & 7) > 3 else 0
+            b_flip = 7 if (b_ksq & 7) > 3 else 0
+            w_bucket = KING_BUCKET_OF_SQUARE[w_ksq] * INPUTS
+            b_bucket = KING_BUCKET_OF_SQUARE[b_ksq] * INPUTS
         w = list(self.ftb)
         b = list(self.ftb)
         for p, sq in pieces:
             color, ptype = p // 6, p % 6
-            w_feat = p * 64 + sq
-            b_feat = ((color ^ 1) * 6 + ptype) * 64 + (sq ^ 56)
+            w_feat = w_bucket + p * 64 + (sq ^ w_flip)
+            b_feat = b_bucket + ((color ^ 1) * 6 + ptype) * 64 + (sq ^ 56 ^ b_flip)
             wo, bo = w_feat * h, b_feat * h
             for i in range(h):
                 w[i] += self.ftw[wo + i]
@@ -117,23 +152,24 @@ def read_net(path) -> Net:
     the literal ASCII "bullet" repeated) -- up to 31 trailing shorts that are neither a
     header nor real weights and must be tolerated, not treated as a parse error.
 
-    total shorts = hidden*(769 + 2*B) + B (+ padding) for some supported bucket count B;
-    both `hidden` and B are inferred, mirroring NnueEvaluator.load exactly."""
+    total shorts = hidden*(768*K + 1 + 2*B) + B (+ padding) for some supported (K, B);
+    `hidden`, K and B are all inferred, mirroring NnueEvaluator.load exactly."""
     with open(path, "rb") as f:
         data = f.read()
     shorts = len(data) // 2
     assert len(data) % 2 == 0, "odd-length file"
-    hidden = buckets = 0
-    for b in SUPPORTED_BUCKETS:
+    hidden = king_buckets = buckets = 0
+    for k, b in SUPPORTED_FORMATS:
         body = shorts - b
-        per_hidden = INPUTS + 1 + 2 * b
+        per_hidden = INPUTS * k + 1 + 2 * b
         if body <= 0:
             continue
         h, trailing = divmod(body, per_hidden)
         if trailing < 32 and h > 0 and h % 32 == 0:
-            assert hidden == 0, f"ambiguous between {buckets} and {b} buckets"
-            hidden, buckets = h, b
-    assert hidden, "not a valid raw net for any supported bucket count"
+            assert hidden == 0, (f"ambiguous between ({king_buckets},{buckets}) and ({k},{b}) "
+                                 f"(kingBuckets,outputBuckets)")
+            hidden, king_buckets, buckets = h, k, b
+    assert hidden, "not a valid raw net for any supported format"
     off = 0
 
     def take(n):
@@ -142,11 +178,11 @@ def read_net(path) -> Net:
         off += 2 * n
         return list(vals)
 
-    ftw = take(INPUTS * hidden)
+    ftw = take(king_buckets * INPUTS * hidden)
     ftb = take(hidden)
     outw = take(buckets * 2 * hidden)
     outb = take(buckets)
-    return Net(hidden, buckets, QA, QB, SCALE, ftw, ftb, outw, outb)
+    return Net(hidden, king_buckets, buckets, QA, QB, SCALE, ftw, ftb, outw, outb)
 
 
 # Positions covering both sides to move, castling, en passant, and lopsided material.
@@ -166,25 +202,26 @@ FIXTURE_FENS = [
 ]
 
 
-def gen_fixture(net_path, golden_path, hidden=32, seed=1234, buckets=1):
+def gen_fixture(net_path, golden_path, hidden=32, seed=1234, buckets=1, king_buckets=1):
     """Deterministic small net (hidden a multiple of 32, like a real net) so the committed
-    fixture stays tiny (~49 KB) and reproducible."""
+    fixture stays small and reproducible."""
     import random
     rng = random.Random(seed)
-    ftw = [rng.randint(-64, 64) for _ in range(INPUTS * hidden)]
+    ftw = [rng.randint(-64, 64) for _ in range(king_buckets * INPUTS * hidden)]
     ftb = [rng.randint(-128, 128) for _ in range(hidden)]
     outw = [rng.randint(-64, 64) for _ in range(buckets * 2 * hidden)]
     outb = [rng.randint(-2000, 2000) for _ in range(buckets)]
-    net = Net(hidden, buckets, QA, QB, SCALE, ftw, ftb, outw, outb)
+    net = Net(hidden, king_buckets, buckets, QA, QB, SCALE, ftw, ftb, outw, outb)
     write_net(net_path, net)
     # round-trip through the file so the golden reflects exactly what a loader will parse
     net = read_net(net_path)
-    assert net.buckets == buckets, "fixture round-trip mis-detected the bucket count"
+    assert net.buckets == buckets, "fixture round-trip mis-detected the output-bucket count"
+    assert net.king_buckets == king_buckets, "fixture round-trip mis-detected the king-bucket count"
     with open(golden_path, "w", encoding="utf-8", newline="\n") as g:
         for fen in FIXTURE_FENS:
             g.write(f"{net.evaluate(fen)}\t{fen}\n")
-    print(f"wrote {net_path} (hidden={hidden}, buckets={buckets}) and {golden_path} "
-          f"({len(FIXTURE_FENS)} positions)", file=sys.stderr)
+    print(f"wrote {net_path} (hidden={hidden}, buckets={buckets}, king_buckets={king_buckets}) "
+          f"and {golden_path} ({len(FIXTURE_FENS)} positions)", file=sys.stderr)
 
 
 def main() -> int:
@@ -194,11 +231,14 @@ def main() -> int:
                     help="write a seeded fixture net + golden evals")
     ap.add_argument("--buckets", type=int, default=1, choices=SUPPORTED_BUCKETS,
                     help="output-bucket count for --gen-fixture (default 1)")
+    ap.add_argument("--king-buckets", type=int, default=1, choices=(1, 10),
+                    help="king-input-bucket count for --gen-fixture (default 1)")
     ap.add_argument("--eval", metavar="NET", help="eval FENs from stdin against NET")
     args = ap.parse_args()
 
     if args.gen_fixture:
-        gen_fixture(args.gen_fixture[0], args.gen_fixture[1], buckets=args.buckets)
+        gen_fixture(args.gen_fixture[0], args.gen_fixture[1],
+                    buckets=args.buckets, king_buckets=args.king_buckets)
         return 0
     if args.eval:
         net = read_net(args.eval)

@@ -36,7 +36,7 @@ class NnueSymmetryTest {
 
     @Test
     void mirrorInvariant() {
-        NnueEvaluator eval = new NnueEvaluator(randomNet(20260705, 32, 1));
+        NnueEvaluator eval = new NnueEvaluator(randomNet(20260705, 32, 1, 1));
         for (String fen : FENS) {
             int e = eval.evaluate(Position.fromFen(fen));
             int em = eval.evaluate(Position.fromFen(mirror(fen)));
@@ -49,11 +49,40 @@ class NnueSymmetryTest {
      *  top of the indexing bugs the single-output test pins. */
     @Test
     void mirrorInvariantWithOutputBuckets() {
-        NnueEvaluator eval = new NnueEvaluator(randomNet(20260706, 32, 8));
+        NnueEvaluator eval = new NnueEvaluator(randomNet(20260706, 32, 1, 8));
         for (String fen : FENS) {
             int e = eval.evaluate(Position.fromFen(fen));
             int em = eval.evaluate(Position.fromFen(mirror(fen)));
             assertEquals(e, em, "bucketed NNUE eval not mirror-invariant for: " + fen);
+        }
+    }
+
+    /** Full-mirror invariance also holds for king-bucketed nets: the vertical flip + colour
+     *  swap + stm swap exchanges the two perspectives wholesale, king squares (each viewed in
+     *  its own orientation) included -- so both sides select identical buckets and flips. */
+    @Test
+    void mirrorInvariantWithKingBuckets() {
+        NnueEvaluator eval = new NnueEvaluator(randomNet(20260707, 32, 10, 8));
+        for (String fen : FENS) {
+            int e = eval.evaluate(Position.fromFen(fen));
+            int em = eval.evaluate(Position.fromFen(mirror(fen)));
+            assertEquals(e, em, "king-bucketed NNUE eval not mirror-invariant for: " + fen);
+        }
+    }
+
+    /** HORIZONTAL mirror (files a<->h, colours and stm unchanged) is a second, independent
+     *  invariance that holds ONLY for horizontally-mirrored king-bucketed nets: every king maps
+     *  to the file-mirrored square, which by construction selects the same bucket with the flip
+     *  toggled, and every piece feature maps onto the mirrored feature exactly. This pins the
+     *  ^7 flip and the 32->64 layout expansion for any weights -- it does NOT hold for plain
+     *  Chess768 nets (their weights are file-specific), so it only runs on the K=10 net. */
+    @Test
+    void horizontalMirrorInvariantWithKingBuckets() {
+        NnueEvaluator eval = new NnueEvaluator(randomNet(20260708, 32, 10, 8));
+        for (String fen : FENS) {
+            int e = eval.evaluate(Position.fromFen(fen));
+            int em = eval.evaluate(Position.fromFen(hmirror(fen)));
+            assertEquals(e, em, "king-bucketed NNUE eval not h-mirror-invariant for: " + fen);
         }
     }
 
@@ -77,10 +106,25 @@ class NnueSymmetryTest {
         return Character.isUpperCase(c) ? Character.toLowerCase(c) : Character.toUpperCase(c);
     }
 
+    /** Horizontal mirror: files a<->h only. Reversing each rank's characters mirrors the files
+     *  (digit runs are single chars, so they survive reversal); colours and stm are unchanged.
+     *  Castling/ep are stripped -- they don't affect the 768-feature eval, and castling rights
+     *  would otherwise make the mirrored FEN illegal. */
+    private static String hmirror(String fen) {
+        String[] parts = fen.trim().split("\\s+");
+        String[] ranks = parts[0].split("/");
+        StringBuilder board = new StringBuilder();
+        for (int i = 0; i < ranks.length; i++) {
+            if (i != 0) board.append('/');
+            board.append(new StringBuilder(ranks[i]).reverse());
+        }
+        return board + " " + parts[1] + " - - 0 1";
+    }
+
     /** Seeded net with values wide enough that clipped ReLU both clips and passes. */
-    private static NnueEvaluator.Network randomNet(long seed, int hidden, int buckets) {
+    private static NnueEvaluator.Network randomNet(long seed, int hidden, int kingBuckets, int buckets) {
         Random rng = new Random(seed);
-        short[] ftw = new short[NnueEvaluator.INPUTS * hidden];
+        short[] ftw = new short[kingBuckets * NnueEvaluator.INPUTS * hidden];
         for (int i = 0; i < ftw.length; i++) ftw[i] = (short) (rng.nextInt(129) - 64);
         short[] ftb = new short[hidden];
         for (int i = 0; i < ftb.length; i++) ftb[i] = (short) (rng.nextInt(257) - 128);
@@ -88,6 +132,6 @@ class NnueSymmetryTest {
         for (int i = 0; i < outw.length; i++) outw[i] = (short) (rng.nextInt(129) - 64);
         int[] outb = new int[buckets];
         for (int i = 0; i < outb.length; i++) outb[i] = rng.nextInt(4001) - 2000;
-        return new NnueEvaluator.Network(hidden, buckets, 255, 64, 400, ftw, ftb, outw, outb);
+        return new NnueEvaluator.Network(hidden, kingBuckets, buckets, 255, 64, 400, ftw, ftb, outw, outb);
     }
 }

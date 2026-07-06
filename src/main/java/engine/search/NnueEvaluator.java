@@ -37,6 +37,13 @@ import engine.board.Position;
  * first {@code hidden} output weights multiply the STM accumulator, the next {@code hidden}
  * the non-STM accumulator. This STM-first ordering is what encodes tempo.
  *
+ * <p>King-bucketed nets (bullet {@code ChessBucketsMirrored}) prepend a per-perspective offset:
+ * feature = {@code 768*bucket(ownKsq) + pieceIdx*64 + (sq ^ hflip)}, where each perspective's
+ * own king square (black's viewed {@code ^56}) selects the bucket from
+ * {@link #KING_BUCKET_OF_SQUARE} and {@code hflip} = 7 iff that king is on files e-h. Because
+ * this evaluator refreshes fully on every call, king buckets cost nothing extra at inference
+ * (the usual incremental-engine pain of bucket-crossing king moves does not exist here).
+ *
  * <h2>Quantization / inference (matches bullet {@code Network::evaluate})</h2>
  * ft weights/bias scaled x{@code QA} (=255); output weights x{@code QB} (=64); output bias
  * x{@code QA*QB}. Activation SCReLU {@code s = clamp(acc,0,QA)^2}. Then, in this exact staged
@@ -84,22 +91,47 @@ public final class NnueEvaluator implements Evaluator {
     // preferred short-species length -- 8/16/32 -- divides 32, so the loop bound is exact).
     private static final VectorSpecies<Short> SP = ShortVector.SPECIES_PREFERRED;
 
-    // Output-bucket counts this loader understands. B=1 is the original single-output net;
-    // B=8 is the material-bucketed net (bullet MaterialCount<8>). The file is header-less, so
-    // the count is detected from the file size like `hidden` is.
-    private static final int[] SUPPORTED_BUCKETS = {1, 8};
+    // (kingBuckets, outputBuckets) combinations this loader understands, i.e. every net
+    // generation actually trained: (1,1) original single-output, (1,8) material output buckets,
+    // (10,8) mirrored king input buckets + material output buckets. The file is header-less, so
+    // the combination is detected from the file size like `hidden` is.
+    private static final int[][] SUPPORTED_FORMATS = {{1, 1}, {1, 8}, {10, 8}};
+
+    // 10-bucket mirrored king layout (bullet ChessBucketsMirrored) -- 32 entries covering files
+    // a-d from each perspective's own orientation (entry = rank*4 + file, rank 0 = own back
+    // rank); kings on files e-h use the file-mirrored entry with all feature squares flipped
+    // (sq^7). MUST match KING_BUCKET_LAYOUT in bullet's simple.rs exactly.
+    private static final int[] KING_BUCKET_LAYOUT_32 = {
+        0, 1, 2, 3,
+        4, 4, 5, 5,
+        6, 6, 6, 6,
+        7, 7, 7, 7,
+        8, 8, 8, 8,
+        8, 8, 8, 8,
+        9, 9, 9, 9,
+        9, 9, 9, 9,
+    };
+    /** Layout expanded to all 64 squares (bullet's own expansion: file e-h mirrors d-a). */
+    private static final int[] KING_BUCKET_OF_SQUARE = new int[64];
+    static {
+        int[] fileFold = {0, 1, 2, 3, 3, 2, 1, 0};
+        for (int sq = 0; sq < 64; sq++) {
+            KING_BUCKET_OF_SQUARE[sq] = KING_BUCKET_LAYOUT_32[(sq / 8) * 4 + fileFold[sq % 8]];
+        }
+    }
 
     /** Immutable, thread-shareable parsed network. One instance is shared across workers. */
     public static final class Network {
-        final int hidden, buckets, qa, qb, scale;
-        final short[] ftWeights; // [feature*hidden + i], feature-major (0..INPUTS-1)
+        final int hidden, kingBuckets, buckets, qa, qb, scale;
+        final short[] ftWeights; // [feature*hidden + i], feature-major (0..kingBuckets*INPUTS-1)
         final short[] ftBias;    // [hidden]
         final short[] outWeights;// [buckets * 2*hidden], bucket-major; within a bucket STM half first
         final int[] outBias;     // [buckets], scaled QA*QB
 
-        Network(int hidden, int buckets, int qa, int qb, int scale,
+        Network(int hidden, int kingBuckets, int buckets, int qa, int qb, int scale,
                 short[] ftWeights, short[] ftBias, short[] outWeights, int[] outBias) {
             this.hidden = hidden;
+            this.kingBuckets = kingBuckets;
             this.buckets = buckets;
             this.qa = qa;
             this.qb = qb;
@@ -125,14 +157,16 @@ public final class NnueEvaluator implements Evaluator {
     }
 
     /**
-     * Reads bullet's raw saved format (header-less, little-endian i16). {@code hidden} and the
-     * output-bucket count {@code B} are inferred from the byte count: total shorts =
-     * {@code 768*h + h + B*2*h + B = h*(769+2B) + B} for some supported {@code B}, PLUS bullet
-     * pads the whole file to a 64-byte boundary with filler bytes (observed: the literal ASCII
-     * "bullet" repeated) -- up to 31 trailing shorts (62 bytes) that are neither a header nor
-     * real weights and must be tolerated, not rejected. For B&gt;1 the output weights are saved
-     * TRANSPOSED (bullet {@code SavedFormat.transpose()}), i.e. bucket-major with each bucket's
-     * {@code 2*h} weights contiguous -- which is exactly the layout inference indexes into.
+     * Reads bullet's raw saved format (header-less, little-endian i16). {@code hidden}, the
+     * king-input-bucket count {@code K} and the output-bucket count {@code B} are inferred from
+     * the byte count: total shorts = {@code 768*K*h + h + B*2*h + B = h*(768K+1+2B) + B} for some
+     * supported {@code (K,B)}, PLUS bullet pads the whole file to a 64-byte boundary with filler
+     * bytes (observed: the literal ASCII "bullet" repeated) -- up to 31 trailing shorts (62
+     * bytes) that are neither a header nor real weights and must be tolerated, not rejected.
+     * For B&gt;1 the output weights are saved TRANSPOSED (bullet {@code SavedFormat.transpose()}),
+     * i.e. bucket-major with each bucket's {@code 2*h} weights contiguous -- which is exactly
+     * the layout inference indexes into. King-bucketed nets are trained with a factoriser, but
+     * bullet merges it into {@code l0w} at save time, so the file structure is identical.
      */
     public static Network load(InputStream in) throws IOException {
         byte[] all = in.readAllBytes();
@@ -140,33 +174,37 @@ public final class NnueEvaluator implements Evaluator {
             throw new IOException("NNUE: odd/empty file (" + all.length + " bytes)");
         }
         long shorts = all.length / 2L;
-        int hidden = 0, buckets = 0;
-        for (int b : SUPPORTED_BUCKETS) {
+        int hidden = 0, kingBuckets = 0, buckets = 0;
+        for (int[] fmt : SUPPORTED_FORMATS) {
+            int k = fmt[0], b = fmt[1];
             long body = shorts - b;              // shorts minus the B outBias values
-            long perHidden = INPUTS + 1 + 2L * b; // ftW + ftBias + outW shorts per hidden unit
+            // ftW (768*K) + ftBias (1) + outW (2*B) shorts per hidden unit
+            long perHidden = (long) INPUTS * k + 1 + 2L * b;
             if (body <= 0) continue;
             long h = body / perHidden;
             long trailing = body % perHidden;    // tolerating pad-to-64-byte filler
             if (trailing < 32 && h > 0 && (h % 32) == 0) {
                 if (hidden != 0) {
-                    throw new IOException("NNUE: " + all.length + " bytes is ambiguous between "
-                            + buckets + " and " + b + " output buckets -- refusing to guess");
+                    throw new IOException("NNUE: " + all.length + " bytes is ambiguous between ("
+                            + kingBuckets + "," + buckets + ") and (" + k + "," + b
+                            + ") (kingBuckets,outputBuckets) -- refusing to guess");
                 }
                 hidden = (int) h;
+                kingBuckets = k;
                 buckets = b;
             }
         }
         if (hidden == 0) {
-            throw new IOException("NNUE: " + all.length + " bytes is not a valid (768->N)x2->B net"
-                    + " for any supported bucket count (hidden must be a positive multiple of 32)");
+            throw new IOException("NNUE: " + all.length + " bytes is not a valid (768xK->N)x2->B"
+                    + " net for any supported format (hidden must be a positive multiple of 32)");
         }
         ByteBuffer buf = ByteBuffer.wrap(all).order(ByteOrder.LITTLE_ENDIAN);
-        short[] ftWeights = readShorts(buf, INPUTS * hidden);
+        short[] ftWeights = readShorts(buf, kingBuckets * INPUTS * hidden);
         short[] ftBias = readShorts(buf, hidden);
         short[] outWeights = readShorts(buf, buckets * 2 * hidden);
         int[] outBias = new int[buckets];
         for (int i = 0; i < buckets; i++) outBias[i] = buf.getShort();
-        return new Network(hidden, buckets, QA, QB, SCALE, ftWeights, ftBias, outWeights, outBias);
+        return new Network(hidden, kingBuckets, buckets, QA, QB, SCALE, ftWeights, ftBias, outWeights, outBias);
     }
 
     private static short[] readShorts(ByteBuffer buf, int n) {
@@ -181,6 +219,23 @@ public final class NnueEvaluator implements Evaluator {
         final short[] ftW = net.ftWeights;
         final short[] w = accWhite;
         final short[] b = accBlack;
+
+        // King input bucket + horizontal mirror per perspective (bullet ChessBucketsMirrored):
+        // each side selects a 768-feature weight set by its OWN king's square, viewed in its own
+        // orientation (black's king square is ^56 first); a king on files e-h uses the mirrored
+        // bucket with every feature square file-flipped (^7). For kingBuckets == 1 (legacy
+        // Chess768 nets) both the base and the flip are zero, reducing to the original formulas.
+        final int wFlip, bFlip, wBucketBase, bBucketBase;
+        if (net.kingBuckets == 1) {
+            wFlip = 0; bFlip = 0; wBucketBase = 0; bBucketBase = 0;
+        } else {
+            int wKsq = Long.numberOfTrailingZeros(pos.pieces(Piece.WHITE * 6 + 5));
+            int bKsq = Long.numberOfTrailingZeros(pos.pieces(Piece.BLACK * 6 + 5)) ^ 56;
+            wFlip = (wKsq & 7) > 3 ? 7 : 0;
+            bFlip = (bKsq & 7) > 3 ? 7 : 0;
+            wBucketBase = KING_BUCKET_OF_SQUARE[wKsq] * INPUTS;
+            bBucketBase = KING_BUCKET_OF_SQUARE[bKsq] * INPUTS;
+        }
 
         // Refresh both perspective accumulators from the bias, then add every piece's column.
         System.arraycopy(net.ftBias, 0, w, 0, hidden);
@@ -198,8 +253,8 @@ public final class NnueEvaluator implements Evaluator {
             while (bb != 0) {
                 int sq = Long.numberOfTrailingZeros(bb);
                 bb &= bb - 1;
-                int wOff = (wBase + sq) * hidden;
-                int bOff = (bBase + (sq ^ 56)) * hidden;
+                int wOff = (wBucketBase + wBase + (sq ^ wFlip)) * hidden;
+                int bOff = (bBucketBase + bBase + (sq ^ 56 ^ bFlip)) * hidden;
                 int bound = SP.loopBound(hidden);
                 int i = 0;
                 for (; i < bound; i += SP.length()) {

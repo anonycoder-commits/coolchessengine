@@ -32,7 +32,7 @@ class NnueInferenceTest {
         ftw[327] = 20;
         short[] ftb = {0};
         short[] outw = {3, 5}; // [STM half, NSTM half]
-        NnueEvaluator.Network net = new NnueEvaluator.Network(1, 1, 255, 64, 400, ftw, ftb, outw, new int[] {1000});
+        NnueEvaluator.Network net = new NnueEvaluator.Network(1, 1, 1, 255, 64, 400, ftw, ftb, outw, new int[] {1000});
 
         int cp = new NnueEvaluator(net).evaluate(
                 Position.fromFen("7k/8/8/8/8/8/8/K7 w - - 0 1"));
@@ -50,7 +50,7 @@ class NnueInferenceTest {
         ftw[327] = 20;
         short[] ftb = {0};
         short[] outw = {-3, -5};
-        NnueEvaluator.Network net = new NnueEvaluator.Network(1, 1, 255, 64, 400, ftw, ftb, outw, new int[] {-1000});
+        NnueEvaluator.Network net = new NnueEvaluator.Network(1, 1, 1, 255, 64, 400, ftw, ftb, outw, new int[] {-1000});
 
         int cp = new NnueEvaluator(net).evaluate(
                 Position.fromFen("7k/8/8/8/8/8/8/K7 w - - 0 1"));

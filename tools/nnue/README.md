@@ -61,16 +61,20 @@ stays the default eval.
 
 | i16 count | field | notes |
 |-----------|-------|-------|
-| 768·N | ftWeights (`l0w`) | feature-major `[feature*N + i]`, scale QA=255 |
+| K·768·N | ftWeights (`l0w`) | feature-major `[feature*N + i]`; king-bucket-major for K>1 (factoriser already merged in by bullet at save), scale QA=255 |
 | N | ftBias (`l0b`) | scale QA |
 | B·2·N | outWeights (`l1w`) | **bucket-major** (bullet saves `l1w` transposed when B>1); within a bucket STM half first, then non-STM, scale QB=64 |
 | B | outBias (`l1b`) | scale QA·QB |
 
-`N` (hidden) and `B` (material output buckets: 1 = original single-output net, 8 = bullet
-`MaterialCount<8>`) are both inferred from the file length (`shorts = N·(769+2B) + B`);
+`N` (hidden), `K` (mirrored king input buckets: 1 = plain `Chess768`, 10 = the
+`ChessBucketsMirrored` layout committed in `NnueEvaluator.KING_BUCKET_LAYOUT_32`) and `B`
+(material output buckets: 1 = original single-output net, 8 = bullet `MaterialCount<8>`) are
+all inferred from the file length (`shorts = N·(768K+1+2B) + B`, supported (K,B) combos only);
 QA/QB/SCALE=400 are fixed to bullet's defaults. `N` must be a multiple of 32 (256 works) so
-bullet's `align(64)` accumulator layout is padding-free. Bucket selection (matching bullet):
-`(piece_count - 2) / ceil(32/B)` — with B=8 each bucket covers 4 piece-counts. Inference
+bullet's `align(64)` accumulator layout is padding-free. Output bucket selection (matching
+bullet): `(piece_count - 2) / ceil(32/B)` — with B=8 each bucket covers 4 piece-counts. King
+bucket selection is per perspective from its OWN king square (black's viewed `^56`): kings on
+files e-h use the file-mirrored layout entry with every feature square flipped `^7`. Inference
 (matching bullet `Network::evaluate`): SCReLU `clamp(acc,0,QA)^2`, then staged
 `out /= QA; out += bias[bucket]; out *= SCALE; out /= QA*QB`.
 

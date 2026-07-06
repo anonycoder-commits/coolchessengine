@@ -30,7 +30,7 @@ class NnueCrossCheckTest {
 
     @Test
     void javaMatchesPythonReference() throws Exception {
-        crossCheck("/nnue/fixture_net.bin", "/nnue/fixture_golden.txt", 1);
+        crossCheck("/nnue/fixture_net.bin", "/nnue/fixture_golden.txt", 1, 1);
     }
 
     /** Same pin for the material-output-bucketed format (bullet MaterialCount&lt;8&gt;): the
@@ -38,16 +38,25 @@ class NnueCrossCheckTest {
      *  layout are both exercised, not just bucket 0. */
     @Test
     void javaMatchesPythonReferenceWithOutputBuckets() throws Exception {
-        crossCheck("/nnue/fixture_net_b8.bin", "/nnue/fixture_golden_b8.txt", 8);
+        crossCheck("/nnue/fixture_net_b8.bin", "/nnue/fixture_golden_b8.txt", 1, 8);
     }
 
-    private void crossCheck(String netResource, String goldenResource, int expectedBuckets)
-            throws Exception {
+    /** And for the king-bucketed format (bullet ChessBucketsMirrored, 10 buckets): the fixture
+     *  FENs place kings on both board halves and several layout rows, so bucket selection, the
+     *  ^7 mirror flip, and the 32->64 layout expansion are all exercised against the reference. */
+    @Test
+    void javaMatchesPythonReferenceWithKingBuckets() throws Exception {
+        crossCheck("/nnue/fixture_net_kb10b8.bin", "/nnue/fixture_golden_kb10b8.txt", 10, 8);
+    }
+
+    private void crossCheck(String netResource, String goldenResource,
+                            int expectedKingBuckets, int expectedBuckets) throws Exception {
         NnueEvaluator.Network net;
         try (InputStream in = getClass().getResourceAsStream(netResource)) {
             assertNotNull(in, netResource + " missing from test resources");
             net = NnueEvaluator.load(in);
         }
+        assertEquals(expectedKingBuckets, net.kingBuckets, "king-bucket count mis-detected from file size");
         assertEquals(expectedBuckets, net.buckets, "bucket count mis-detected from file size");
         NnueEvaluator eval = new NnueEvaluator(net);
 
