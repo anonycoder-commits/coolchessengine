@@ -78,6 +78,24 @@ jobs:
           name: baseline-classes
           path: baseline/build/classes/java/main
           retention-days: 1
+      # Separate, optional artifacts for NNUE net files (e.g. tools/nnue/nets/*.bin) -- kept apart
+      # from the classes artifacts above so the existing -cp candidate-classes/baseline-classes
+      # classpath usage below never changes. if-no-files-found: ignore makes this a no-op for
+      # every ordinary (non-NNUE) gate, where this directory doesn't exist on either ref.
+      - name: Upload candidate NNUE nets (if any)
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-nnue-nets
+          path: candidate/tools/nnue/nets
+          retention-days: 1
+          if-no-files-found: ignore
+      - name: Upload baseline NNUE nets (if any)
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-nnue-nets
+          path: baseline/tools/nnue/nets
+          retention-days: 1
+          if-no-files-found: ignore
 
   gate:
     needs: build
@@ -117,6 +135,23 @@ jobs:
         with:
           name: baseline-classes
           path: baseline-classes
+      # Optional: only present when the build job actually found tools/nnue/nets on that ref
+      # (see if-no-files-found: ignore above) -- continue-on-error so an ordinary, non-NNUE gate
+      # (no such artifact was ever uploaded) doesn't fail the shard over a missing download.
+      - name: Download candidate NNUE nets (if any)
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: candidate-nnue-nets
+          path: candidate-nnue-nets
+      - name: Download baseline NNUE nets (if any)
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: baseline-nnue-nets
+          path: baseline-nnue-nets
       - name: Run this shard
         if: steps.check.outputs.skip == 'false'
         run: |
@@ -127,6 +162,10 @@ jobs:
           # Distribute any remainder across the first (TOTAL % SHARDS) shards so counts differ
           # by at most 1, and each shard's -startGame lines up with a single unsharded run's
           # sequential game numbering (see MatchRunner's -startGame doc).
+          # For an NNUE gate, reference the net via extra_args, e.g.:
+          #   -eopt "UseNNUE=true" -eopt "EvalFile=candidate-nnue-nets/simple-40.bin"
+          # (or baseline-nnue-nets/... for the opponent side) -- these are the download paths
+          # from the optional steps above, populated only when that ref has tools/nnue/nets/.
           BASE=$(( TOTAL / SHARDS ))
           REM=$(( TOTAL % SHARDS ))
           if [ "$IDX" -lt "$REM" ]; then
