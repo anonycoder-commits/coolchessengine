@@ -142,7 +142,7 @@ jobs:
           java -cp candidate-classes engine.tools.MatchRunner \
             -engine cp:candidate-classes -opponent cp:baseline-classes \
             -games "$MY_GAMES" -movetime ${{ inputs.movetime }} -startGame "$START" \
-            -concurrency 2 ${{ inputs.extra_args }} | tee shard-output.txt
+            -concurrency 4 ${{ inputs.extra_args }} | tee shard-output.txt
       - name: Extract shard tally
         if: steps.check.outputs.skip == 'false'
         run: |
