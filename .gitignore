@@ -30,6 +30,7 @@ lichess-bot/.venv/
 !tools/epd/*.epd
 *.bin
 !src/test/resources/nnue/*.bin
+!tools/nnue/nets/*.bin
 *.dat
 *.db
 *.nnue
