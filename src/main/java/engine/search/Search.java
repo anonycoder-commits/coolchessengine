@@ -512,7 +512,7 @@ public final class Search {
     public boolean useRazoring = true;        // shallow non-PV: drop to qsearch when eval << alpha
     public boolean useProbcut = true;         // depth>=5: a good capture that survives a raised-beta qsearch cuts
     public boolean useNullMoveEvalScale = false; // scale null-move reduction by (staticEval - beta); off pending gate
-    public boolean useHistoryLmr = false;     // continuous history-scaled LMR reduction (vs binary step); off pending gate
+    public boolean useHistoryLmr = true;     // continuous history-scaled LMR reduction (vs binary step); off pending gate
     public boolean useSingularExtDouble = true; // double / negative singular extensions
     public boolean useLmrTtCapture = true;    // reduce one extra ply when the TT move is a capture
     public boolean useHistoryPruning = true; // skip quiets with deeply negative history at shallow depth
