@@ -182,6 +182,14 @@ jobs:
             -engine cp:candidate-classes -opponent cp:baseline-classes \
             -games "$MY_GAMES" -movetime ${{ inputs.movetime }} -startGame "$START" \
             -concurrency 4 ${{ inputs.extra_args }} | tee shard-output.txt
+          # Fail loudly if either engine silently fell back to the handcrafted eval: an asymmetric
+          # NNUE-vs-HCE gate measures the ~+74 Elo eval gap, not the change under test (this once
+          # made three neutral search tweaks read as +70-110 Elo). MatchRunner's pre-flight emits
+          # GATE-EVAL-WARNING on exactly that -- never let such a shard's tally be counted.
+          if grep -q "GATE-EVAL-WARNING" shard-output.txt; then
+            echo "::error::Shard ${{ matrix.shard }}: an engine fell back to the handcrafted eval (see GATE-EVAL-WARNING). Fix net loading (EvalFile path / net artifact) and re-run."
+            exit 1
+          fi
       - name: Extract shard tally
         if: steps.check.outputs.skip == 'false'
         run: |
