@@ -163,7 +163,7 @@ jobs:
           # by at most 1, and each shard's -startGame lines up with a single unsharded run's
           # sequential game numbering (see MatchRunner's -startGame doc).
           # For an NNUE gate, reference the net via extra_args, e.g.:
-          #   -eopt "UseNNUE=true" -eopt "EvalFile=candidate-nnue-nets/simple-40.bin"
+          #   -eopt "UseNNUE=true" -eopt "EvalFile=candidate-nnue-nets/simple-kb10.bin"
           # (or baseline-nnue-nets/... for the opponent side) -- these are the download paths
           # from the optional steps above, populated only when that ref has tools/nnue/nets/.
           BASE=$(( TOTAL / SHARDS ))
