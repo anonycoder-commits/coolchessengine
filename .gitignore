@@ -29,9 +29,14 @@ lichess-bot/.venv/
 *.epd
 !tools/epd/*.epd
 *.bin
+!src/test/resources/nnue/*.bin
+!tools/nnue/nets/*.bin
 *.dat
 *.db
 *.nnue
+# ...but the bundled shipping default net IS tracked -- it's what the engine loads by default
+# (auto-ships in the jar via copyToLichessBot); a clean checkout must have it.
+!src/main/resources/nnue/default.nnue
 *.log
 
 # --- NNUE derived data / weights (large, regenerable; keep the scripts, not the outputs) ---

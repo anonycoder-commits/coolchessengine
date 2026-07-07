@@ -89,6 +89,7 @@ public final class MatchRunner {
         String opponentPath = null;
         int games = DEFAULT_GAMES;
         int movetimeMs = DEFAULT_MOVETIME_MS;
+        int depth = 0;         // >0 => fixed-depth mode (removes speed from the comparison)
         int concurrency = DEFAULT_CONCURRENCY;
         int startGame = 0; // global game index this invocation's local game 0 corresponds to
         TimeControl tc = null; // null => fixed movetime (existing behaviour)
@@ -103,6 +104,7 @@ public final class MatchRunner {
                     case "-opponent": opponentPath = args[++i]; break;
                     case "-games": games = Integer.parseInt(args[++i]); break;
                     case "-movetime": movetimeMs = Integer.parseInt(args[++i]); break;
+                    case "-depth": depth = Integer.parseInt(args[++i]); break;
                     case "-concurrency": concurrency = Integer.parseInt(args[++i]); break;
                     case "-startGame": startGame = Integer.parseInt(args[++i]); break;
                     case "-tc": tc = TimeControl.parse(args[++i]); break;
@@ -133,8 +135,13 @@ public final class MatchRunner {
         List<String> engineOpts = new ArrayList<>(commonOptions); engineOpts.addAll(engineOptions);
         List<String> opponentOpts = new ArrayList<>(commonOptions); opponentOpts.addAll(opponentOptions);
 
+        // Fixed depth removes speed from the comparison entirely (both engines search to the same
+        // nominal depth), so it takes precedence over any time control -- clock adjudication is
+        // meaningless when nobody is racing a clock.
+        if (depth > 0) tc = null;
+
         validateOpenings(); // fail fast on a book typo, before spawning any subprocess
-        new MatchRunner().run(enginePath, opponentPath, games, movetimeMs, Math.max(1, concurrency),
+        new MatchRunner().run(enginePath, opponentPath, games, movetimeMs, depth, Math.max(1, concurrency),
                 startGame, tc, engineOpts, opponentOpts);
     }
 
@@ -185,7 +192,7 @@ public final class MatchRunner {
 
     private static void printUsage() {
         System.out.println("Usage: MatchRunner [-engine <spec>] -opponent <spec> "
-                + "[-games N] [-movetime ms | -tc BASE+INC] [-concurrency N]");
+                + "[-games N] [-movetime ms | -tc BASE+INC | -depth N] [-concurrency N]");
         System.out.println("       [-option NAME=VALUE] [-eopt NAME=VALUE] [-oopt NAME=VALUE]");
         System.out.println("  <spec> is either cp:<classes-dir> for our own build (direct java exec, no");
         System.out.println("  shell hop -- fast) or a path to an external UCI engine executable.");
@@ -193,6 +200,8 @@ public final class MatchRunner {
         System.out.println("  -engine absent -> tested engine runs in-process (fast, biased; smoke only)");
         System.out.println("  -tc BASE+INC   -> clock-based control in seconds (e.g. 10+0.1, 60+0.6);");
         System.out.println("                    sends wtime/btime/winc/binc and adjudicates time forfeits.");
+        System.out.println("  -depth N       -> fixed depth per move (sends 'go depth N'); removes speed from");
+        System.out.println("                    the comparison to measure pure eval quality. Overrides -tc/-movetime.");
         System.out.println("  -option/-eopt/-oopt -> setoption sent to both / tested engine / opponent");
         System.out.println("                    (quote names with spaces, e.g. -eopt \"Move Overhead=100\").");
         System.out.println("  -startGame N   -> this invocation's local game 0 is global game N (default 0).");
@@ -237,14 +246,17 @@ public final class MatchRunner {
         if (testedEngine) engineTimeForfeits++; else opponentTimeForfeits++;
     }
 
-    private void run(String enginePath, String opponentPath, int games, int movetimeMs, int concurrency,
-                     int startGame, TimeControl tc, List<String> engineOpts, List<String> opponentOpts) {
+    private void run(String enginePath, String opponentPath, int games, int movetimeMs, int depth,
+                     int concurrency, int startGame, TimeControl tc, List<String> engineOpts,
+                     List<String> opponentOpts) {
         System.out.println(enginePath == null
                 ? "Mode: in-process tested engine (BIASED -- smoke checks only)"
                 : "Mode: referee (both subprocess -- unbiased)");
-        System.out.println(tc == null
-                ? "Time control: fixed " + movetimeMs + "ms/move"
-                : "Time control: " + (tc.baseMs / 1000.0) + "+" + (tc.incMs / 1000.0) + " (clock-based)");
+        System.out.println(depth > 0
+                ? "Time control: fixed depth " + depth + " (speed removed -- pure eval-quality gate)"
+                : tc == null
+                        ? "Time control: fixed " + movetimeMs + "ms/move"
+                        : "Time control: " + (tc.baseMs / 1000.0) + "+" + (tc.incMs / 1000.0) + " (clock-based)");
         ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         List<Future<GameResult>> futures = new ArrayList<>(games);
         boolean[] engineWhiteByGame = new boolean[games];
@@ -260,7 +272,7 @@ public final class MatchRunner {
                 final String opening = OPENINGS[(globalG / 2) % OPENINGS.length];
                 engineWhiteByGame[g] = engineIsWhite;
                 futures.add(pool.submit(gameTask(enginePath, opponentPath, engineIsWhite, opening,
-                        movetimeMs, tc, engineOpts, opponentOpts)));
+                        movetimeMs, depth, tc, engineOpts, opponentOpts)));
             }
             for (int g = 0; g < games; g++) {
                 GameResult result;
@@ -286,7 +298,8 @@ public final class MatchRunner {
 
     private Callable<GameResult> gameTask(String enginePath, String opponentPath,
                                           boolean engineIsWhite, String opening, int movetimeMs,
-                                          TimeControl tc, List<String> engineOpts, List<String> opponentOpts) {
+                                          int depth, TimeControl tc, List<String> engineOpts,
+                                          List<String> opponentOpts) {
         return () -> {
             Player engine = (enginePath == null)
                     ? new InProcessEngine()
@@ -295,7 +308,7 @@ public final class MatchRunner {
             try {
                 Player white = engineIsWhite ? engine : opponent;
                 Player black = engineIsWhite ? opponent : engine;
-                return playGame(white, black, engineIsWhite, opening, movetimeMs, tc);
+                return playGame(white, black, engineIsWhite, opening, movetimeMs, depth, tc);
             } finally {
                 engine.close();
                 opponent.close();
@@ -345,7 +358,7 @@ public final class MatchRunner {
      *  {@link TimeControl}, per-side clocks are maintained here and a side that overruns its
      *  clock (beyond a small pipe-latency grace) forfeits on time. */
     private GameResult playGame(Player white, Player black, boolean engineIsWhite,
-                                String opening, int movetimeMs, TimeControl tc) {
+                                String opening, int movetimeMs, int depth, TimeControl tc) {
         Position pos = Position.startpos();
         white.newGame();
         black.newGame();
@@ -375,9 +388,11 @@ public final class MatchRunner {
 
             boolean whiteToMove = pos.sideToMove() == Piece.WHITE;
             Player toMove = whiteToMove ? white : black;
-            GoRequest req = tc == null
-                    ? GoRequest.moveTime(movetimeMs)
-                    : GoRequest.clock(whiteClock, blackClock, tc.incMs, tc.incMs);
+            GoRequest req = depth > 0
+                    ? GoRequest.depth(depth)
+                    : tc == null
+                            ? GoRequest.moveTime(movetimeMs)
+                            : GoRequest.clock(whiteClock, blackClock, tc.incMs, tc.incMs);
 
             long startNanos = System.nanoTime();
             String uci = toMove.bestMove(uciMoves, req);
@@ -428,32 +443,40 @@ public final class MatchRunner {
         void close();
     }
 
-    /** A single search request: either a fixed movetime, or per-side clocks + increments. */
+    /** A single search request: a fixed movetime, per-side clocks + increments, or a fixed depth. */
     private static final class GoRequest {
         final int movetimeMs;                 // >0 => fixed-movetime mode
         final long wtimeMs, btimeMs, wincMs, bincMs;
+        final int depthPlies;                 // >0 => fixed-depth mode (no time budget)
         final boolean clockMode;
 
-        private GoRequest(int movetimeMs, long wtimeMs, long btimeMs, long wincMs, long bincMs, boolean clockMode) {
+        private GoRequest(int movetimeMs, long wtimeMs, long btimeMs, long wincMs, long bincMs,
+                          int depthPlies, boolean clockMode) {
             this.movetimeMs = movetimeMs; this.wtimeMs = wtimeMs; this.btimeMs = btimeMs;
-            this.wincMs = wincMs; this.bincMs = bincMs; this.clockMode = clockMode;
+            this.wincMs = wincMs; this.bincMs = bincMs; this.depthPlies = depthPlies; this.clockMode = clockMode;
         }
 
-        static GoRequest moveTime(int ms) { return new GoRequest(ms, 0, 0, 0, 0, false); }
+        static GoRequest moveTime(int ms) { return new GoRequest(ms, 0, 0, 0, 0, 0, false); }
 
         static GoRequest clock(long wtime, long btime, long winc, long binc) {
-            return new GoRequest(0, wtime, btime, winc, binc, true);
+            return new GoRequest(0, wtime, btime, winc, binc, 0, true);
         }
+
+        static GoRequest depth(int plies) { return new GoRequest(0, 0, 0, 0, 0, plies, false); }
 
         /** The UCI {@code go} command body (without the leading "go "). */
         String uci() {
+            if (depthPlies > 0) return "depth " + depthPlies;
             if (!clockMode) return "movetime " + movetimeMs;
             return "wtime " + Math.max(1, wtimeMs) + " btime " + Math.max(1, btimeMs)
                     + " winc " + wincMs + " binc " + bincMs;
         }
 
-        /** Upper bound the referee waits for a reply before treating the engine as hung. */
+        /** Upper bound the referee waits for a reply before treating the engine as hung. Fixed
+         *  depth has no time budget, so use a generous flat cap -- long enough for a slow eval to
+         *  finish a deep search on a hard position, short enough that a genuine hang still surfaces. */
         long timeoutMs() {
+            if (depthPlies > 0) return 120_000;
             long budget = clockMode ? Math.max(wtimeMs, btimeMs) : movetimeMs;
             return Math.max(3000, budget * 10L) + 5000;
         }
@@ -474,9 +497,11 @@ public final class MatchRunner {
                 MoveGenerator.generateLegal(pos, legal);
                 pos.makeMove(findMove(legal, u));
             }
-            SearchLimits limits = req.clockMode
-                    ? SearchLimits.clock((int) req.wtimeMs, (int) req.btimeMs, (int) req.wincMs, (int) req.bincMs)
-                    : SearchLimits.moveTime(req.movetimeMs);
+            SearchLimits limits = req.depthPlies > 0
+                    ? SearchLimits.depth(req.depthPlies)
+                    : req.clockMode
+                            ? SearchLimits.clock((int) req.wtimeMs, (int) req.btimeMs, (int) req.wincMs, (int) req.bincMs)
+                            : SearchLimits.moveTime(req.movetimeMs);
             int move = search.think(pos, limits);
             if (move == 0) {
                 MoveList legal = new MoveList();
@@ -518,8 +543,10 @@ public final class MatchRunner {
             ProcessBuilder pb = spec.startsWith("cp:")
                     // Direct java exec: no cmd.exe/.bat hop (that indirection roughly doubled
                     // process-spawn latency and, under concurrency, caused severe stalls --
-                    // see the class doc's referee-mode note).
-                    ? new ProcessBuilder(javaBin(), "-cp", spec.substring(3), "engine.uci.Uci")
+                    // see the class doc's referee-mode note). --add-modules is needed for the
+                    // NNUE SIMD path and harmless to the handcrafted eval (which never loads it).
+                    ? new ProcessBuilder(javaBin(), "--add-modules", "jdk.incubator.vector",
+                            "-cp", spec.substring(3), "engine.uci.Uci")
                     : new ProcessBuilder(spec);
             process = pb.redirectErrorStream(true).start();
             in = new PrintWriter(new OutputStreamWriter(process.getOutputStream()), true);

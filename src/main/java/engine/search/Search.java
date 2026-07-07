@@ -105,6 +105,11 @@ public final class Search {
     // zugzwang-prone king/pawn endgames where passing is actually the losing option.
     private static final int NULL_MOVE_MIN_DEPTH = 3;
     private static final int NULL_MOVE_REDUCTION = 3;
+    // Eval-margin term for the null-move reduction (useNullMoveEvalScale): the further static
+    // eval already exceeds beta, the more certain a null-move cutoff is, so reduce harder. Added
+    // on top of the depth term; DIVISOR cp above beta = +1 reduction, capped at MAX_R. SPSA-tunable.
+    private static final int NULL_MOVE_EVAL_DIVISOR = 200; // 2.00 pawns above beta -> +1 reduction
+    private static final int NULL_MOVE_EVAL_MAX_R = 3;     // cap the extra reduction
     // Depth from which a null-move fail-high is re-verified by a reduced, null-move-disabled
     // search before it is trusted -- catches the zugzwang-style positions where passing looks
     // fine but every real move is bad, which the static-eval and non-pawn-material gates alone
@@ -177,6 +182,11 @@ public final class Search {
     private static final int SOFT_BOUND_STABLE_ITERATIONS = 14;
     private static final int SOFT_BOUND_STABLE_ITERATIONS_DECISIVE = 2; // relaxed threshold once clearly winning
     private static final int SOFT_BOUND_DECISIVE_SCORE_CP = 200; // +2.00 pawns
+    // Eval-trend brake (useTimeTrendBrake): a committed root score that fell more than this many
+    // centipawns since the previous iteration means the position is turning against us, so the
+    // optimum-time soft exit is suppressed for that iteration and the engine keeps thinking. Sits
+    // between VOLATILITY_SWING_CP (30) and EVAL_LOCK_MAX_ABS_SCORE_CP (50); SPSA-tunable.
+    private static final int TREND_BRAKE_MIN_DROP_CP = 40;
 
     // Adaptive time management (useAdaptiveTime; default OFF pending a self-play gate). Replaces
     // the binary stability threshold with a *continuous* stop-time scale and adds a game-ply
@@ -285,6 +295,12 @@ public final class Search {
     // in updateHistory() self-bounds cleanly in both directions.
     private static final int HISTORY_MAX = 100_000;
     private static final int HISTORY_MIN = -HISTORY_MAX;
+    // Continuous history-based LMR softening (useHistoryLmr): instead of a single binary -1 ply
+    // for quiets scoring >= HISTORY_MAX/2, scale the LMR reduction by the quiet's combined
+    // history score. DIVISOR score-units = 1 ply (so the legacy HISTORY_MAX/2 threshold maps to
+    // ~1 ply), clamped to +-MAX plies. SPSA-tunable.
+    private static final int HISTORY_LMR_DIVISOR = 50_000;
+    private static final int HISTORY_LMR_MAX = 2;
     // Deliberately far below HISTORY_MIN: a losing capture must never be able to outscore
     // even the most heavily-malused quiet move.
     private static final int BAD_CAPTURE_BASE = -1_000_000;
@@ -495,6 +511,8 @@ public final class Search {
     // downside. useCutnodeLmr stays OFF (prior batch-2 negative evidence; separate retest).
     public boolean useRazoring = true;        // shallow non-PV: drop to qsearch when eval << alpha
     public boolean useProbcut = true;         // depth>=5: a good capture that survives a raised-beta qsearch cuts
+    public boolean useNullMoveEvalScale = false; // scale null-move reduction by (staticEval - beta); off pending gate
+    public boolean useHistoryLmr = false;     // continuous history-scaled LMR reduction (vs binary step); off pending gate
     public boolean useSingularExtDouble = true; // double / negative singular extensions
     public boolean useLmrTtCapture = true;    // reduce one extra ply when the TT move is a capture
     public boolean useHistoryPruning = true; // skip quiets with deeply negative history at shallow depth
@@ -554,6 +572,18 @@ public final class Search {
     // rather than deleted, since the underlying technique (node-effort scaling) is standard and
     // the miscalibration looks like a constant-tuning problem, not a broken idea.
     public boolean useAdaptiveTime = false;
+
+    // Eval-trend brake for the DEFAULT (non-adaptive) time path: when the committed root score
+    // drops more than TREND_BRAKE_MIN_DROP_CP since the previous iteration, suppress the
+    // optimum-time soft exit so the engine keeps thinking instead of banking the clock into a
+    // collapsing position -- the failure behind a game thrown from ~0 to mated with 50-90s of
+    // clock unused, moving in ~3s/move as the eval fell. This is the eval-TREND half of the
+    // parked adaptive-time block, extracted WITHOUT its discordant node-effort factor, so it can
+    // be gated in isolation. Still bounded by softLimitMs (at worst it spends the rest of the
+    // per-move budget, never the whole clock) and overridden by the lost-position brake. Default
+    // OFF pending a self-play gate at BOTH a fast and a slow TC -- time-management changes must
+    // never ship on a bullet result alone (see the useAdaptiveTime discordance note above).
+    public boolean useTimeTrendBrake = false;
 
     // Obvious-move pruning: skip search entirely on a forced single reply, and cut
     // iterative deepening short once a shallow iteration shows a lopsided root gap.
@@ -885,17 +915,29 @@ public final class Search {
                     break;
                 }
             } else if (!pondering && useTime && d >= SOFT_BOUND_MIN_DEPTH) {
+                // Eval-trend brake: if the committed root score DROPPED more than
+                // TREND_BRAKE_MIN_DROP_CP since the previous iteration, the position is turning
+                // against us -- exactly when banking the clock is most dangerous. Suppress the
+                // optimum-time soft exit for this iteration so the search keeps thinking (still
+                // bounded by softLimitMs below, and overridden by the lost-position brake once the
+                // score is clearly losing). This is the trend half of the parked adaptive-time
+                // block WITHOUT its discordant node-effort factor.
+                boolean evalFalling = useTimeTrendBrake
+                        && (prevIterScore - committedScore) > TREND_BRAKE_MIN_DROP_CP;
                 // Acceleration rule: a decisively winning score (> +2.00 pawns) needs only 2
-                // stable iterations instead of 3 -- the position is unlikely to be spoiled by
-                // one fewer confirmation, so we can bank the extra time even faster.
+                // stable iterations instead of the full SOFT_BOUND_STABLE_ITERATIONS -- the
+                // position is unlikely to be spoiled by one fewer confirmation, so we can bank the
+                // extra time even faster.
                 int requiredStableIterations = committedScore > SOFT_BOUND_DECISIVE_SCORE_CP
                         ? SOFT_BOUND_STABLE_ITERATIONS_DECISIVE
                         : SOFT_BOUND_STABLE_ITERATIONS;
                 // Arm the mid-iteration check (see checkTime()) as soon as stability is met,
                 // regardless of whether elapsed time has crossed optimumTimeMs yet -- once
                 // armed, the *next* iteration no longer needs to run to completion (or to
-                // hardLimitMs) before the engine can react to the clock catching up.
-                softStopArmed = stableIterationsCount >= requiredStableIterations;
+                // hardLimitMs) before the engine can react to the clock catching up. Never arm
+                // while the eval is falling (the trend brake above) -- a stale `true` here would
+                // still be honored mid-iteration by checkTime().
+                softStopArmed = !evalFalling && stableIterationsCount >= requiredStableIterations;
                 if (softStopArmed && elapsedMs() >= optimumTimeMs) {
                     stop = true;
                     // Propagate immediately instead of waiting for the caller to notice this
@@ -1180,6 +1222,13 @@ public final class Search {
             // Dynamic reduction: deeper searches can afford (and benefit from) a larger null
             // reduction, since the confirming re-search still has ample depth left.
             int r = NULL_MOVE_REDUCTION + depth / 6;
+            if (useNullMoveEvalScale) {
+                // Reduce harder when the static eval already sits well above beta -- the further
+                // over, the more certain the cutoff. staticEval >= beta is guaranteed by the gate
+                // above, so this term is non-negative. Capped so a huge margin can't over-reduce;
+                // at low depth depth-1-r simply falls into qsearch as it already does today.
+                r += Math.min((staticEval - beta) / NULL_MOVE_EVAL_DIVISOR, NULL_MOVE_EVAL_MAX_R);
+            }
             pos.makeNullMove();
             moveStack[ply] = 0;
             pieceToStack[ply] = -1; // a null move is nobody's continuation
@@ -1467,9 +1516,21 @@ public final class Search {
                     // ...and a step softer for moves ordering already trusts: killers, or a
                     // strong combined history/continuation-history score (scores[i] is that
                     // combined signal for plain quiets; killer band values also clear it).
-                    if (move == killers[ply][0] || move == killers[ply][1]
-                            || scores[i] >= HISTORY_MAX / 2) {
-                        reduction--;
+                    if (move == killers[ply][0] || move == killers[ply][1]) {
+                        reduction--; // killers: ordering already trusts them, soften a ply
+                    } else if (useHistoryLmr && scores[i] < 3 * HISTORY_MAX) {
+                        // Continuous history-modulated softening, replacing the single binary cliff
+                        // at HISTORY_MAX/2. scores[i] here IS this quiet's combined butterfly +
+                        // continuation history (lmrCandidate requires isQuiet), range +-3*HISTORY_MAX.
+                        // Values >= 3*HISTORY_MAX are fixed ordering bands (countermove at 700k etc.),
+                        // NOT history magnitudes -- left to the legacy branch below. A well-scoring
+                        // quiet reduces less (or a ply more search); a poorly-scoring one reduces more.
+                        int histAdj = scores[i] / HISTORY_LMR_DIVISOR;
+                        if (histAdj > HISTORY_LMR_MAX) histAdj = HISTORY_LMR_MAX;
+                        else if (histAdj < -HISTORY_LMR_MAX) histAdj = -HISTORY_LMR_MAX;
+                        reduction -= histAdj;
+                    } else if (scores[i] >= HISTORY_MAX / 2) {
+                        reduction--; // countermoves; and every strong quiet when the toggle is off (legacy)
                     }
                     // Same carve-out LMP already applies: an advanced pawn push carries slow,
                     // long-term value that a quiet move's low history badly underrates, so it is

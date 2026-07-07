@@ -10,6 +10,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import engine.board.Position;
 
@@ -54,6 +55,11 @@ public final class LazySmpSearch {
     private volatile boolean pendingPonder; // armed via setPondering, applied to the master
     private volatile long moveOverheadMs = 100; // applied to the master worker each think()
     private volatile int contempt = 10;         // applied to EVERY worker each think()
+    // How each worker's evaluator is built. Default handcrafted; the UCI layer swaps in an
+    // NNUE factory when UseNNUE is on. A factory (not a shared instance) because each worker
+    // needs its OWN evaluator -- HandcraftedEvaluator's pawn cache and NnueEvaluator's
+    // accumulator scratch are per-instance mutable state, unsafe to share across threads.
+    private Supplier<Evaluator> evaluatorFactory = HandcraftedEvaluator::new;
 
     public int bestMove;
     public int bestScore;
@@ -95,6 +101,18 @@ public final class LazySmpSearch {
     /** Sets the contempt (draw aversion, cp) applied to every worker on the next {@link #think}. */
     public void setContempt(int cp) { contempt = cp; }
 
+    /**
+     * Sets how each worker's evaluator is built (default: handcrafted). Applied to already-built
+     * persistent workers too, so a mid-session eval swap takes effect. Not safe to call while
+     * {@link #think} is running (same constraint as {@link #setHashSize}).
+     */
+    public void setEvaluatorFactory(Supplier<Evaluator> factory) {
+        this.evaluatorFactory = factory;
+        if (workers != null) {
+            for (Search worker : workers) worker.setEvaluator(factory.get());
+        }
+    }
+
     /** UCI "ponderhit": rebase the master worker's clock and let normal timing take over. */
     public void ponderHit() { if (workers != null) workers[0].ponderHit(); }
 
@@ -109,9 +127,10 @@ public final class LazySmpSearch {
         if (workers == null) {
             workers = new Search[threadCount];
             for (int id = 0; id < threadCount; id++) {
-                // One evaluator per worker: HandcraftedEvaluator owns a pawn cache and is
-                // therefore NOT shareable across threads (see its class javadoc).
-                Search worker = new Search(new HandcraftedEvaluator(), tt);
+                // One evaluator per worker: HandcraftedEvaluator owns a pawn cache (and
+                // NnueEvaluator its accumulator scratch), so instances are NOT shareable
+                // across threads -- the factory hands each worker its own.
+                Search worker = new Search(evaluatorFactory.get(), tt);
                 worker.printInfo = id == 0; // only the master prints UCI 'info'/'bestmove' text
                 worker.setSharedStop(sharedStop);
                 workers[id] = worker;

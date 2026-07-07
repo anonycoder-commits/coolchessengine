@@ -13,6 +13,7 @@ import engine.board.MoveList;
 import engine.board.Position;
 import engine.search.HandcraftedEvaluator;
 import engine.search.LazySmpSearch;
+import engine.search.NnueEvaluator;
 import engine.search.Search;
 import engine.search.SearchLimits;
 import engine.search.TranspositionTable;
@@ -41,6 +42,16 @@ public final class Uci {
     private int contempt = 10;         // UCI "Contempt" option; applied to the search per 'go'
     private LazySmpSearch smp; // built lazily once Threads > 1 is requested
 
+    // NNUE eval selection. NNUE is now the shipping default (the bundled simple-b8 net gated
+    // +30 Elo [+17,+42] over the handcrafted eval at fixed time, 3000 games). Set UseNNUE=false
+    // to force the handcrafted eval. If the bundled net can't load (e.g. the incubator Vector
+    // API module isn't on the launch command line), applyEvaluator() falls back to handcrafted
+    // so the engine always plays. NB: engine.tools.Bench still benchmarks the handcrafted eval
+    // (a fixed reference), so its signature is independent of this default and unchanged.
+    private boolean useNnue = true;
+    private String evalFile = "";
+    private NnueEvaluator.Network nnueNet; // parsed once, shared read-only across workers
+
     // A single persistent daemon thread (rather than a fresh Thread per 'go') so the input
     // loop can keep reading 'stop'/'quit' while a search is in flight. Persistent also
     // matters for correctness under piped stdout (e.g. UciProtocolTest): a short-lived
@@ -63,6 +74,11 @@ public final class Uci {
     }
 
     public void run() throws IOException {
+        // NNUE is the default eval, so select it up front (loads the bundled net, or degrades to
+        // handcrafted if it can't) -- otherwise a GUI that never sends `setoption UseNNUE`, which
+        // it won't since true is already the default, would silently play with the field's
+        // initial handcrafted evaluator despite advertising NNUE.
+        applyEvaluator();
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
         String line;
         while ((line = in.readLine()) != null) {
@@ -78,6 +94,8 @@ public final class Uci {
                     System.out.println("option name Ponder type check default false");
                     System.out.println("option name Move Overhead type spin default 100 min 0 max 5000");
                     System.out.println("option name Contempt type spin default 10 min -50 max 100");
+                    System.out.println("option name UseNNUE type check default true");
+                    System.out.println("option name EvalFile type string default <empty>");
                     System.out.println("uciok");
                     break;
                 case "isready":
@@ -180,6 +198,74 @@ public final class Uci {
             if (ms >= 0) moveOverheadMs = Math.min(ms, 5000);
         } else if (name.equalsIgnoreCase("Contempt") && valueIdx >= 0) {
             contempt = Math.max(-50, Math.min(100, parseInt(tokens, valueIdx + 1)));
+        } else if (name.equalsIgnoreCase("UseNNUE") && valueIdx >= 0) {
+            useNnue = Boolean.parseBoolean(tokens[valueIdx + 1]);
+            applyEvaluator();
+        } else if (name.equalsIgnoreCase("EvalFile") && valueIdx >= 0) {
+            // A path may contain spaces, so join every token after 'value'.
+            StringBuilder v = new StringBuilder();
+            for (int i = valueIdx + 1; i < tokens.length; i++) {
+                if (v.length() > 0) v.append(' ');
+                v.append(tokens[i]);
+            }
+            evalFile = v.toString();
+            nnueNet = null; // force a reload from the new path
+            if (useNnue) applyEvaluator();
+        }
+    }
+
+    /**
+     * Points the single-threaded search (and the SMP manager, if built) at the currently
+     * selected evaluator. NNUE only if it is enabled AND a net loads; otherwise -- including
+     * every failure path -- it falls back to the handcrafted eval so the engine always plays.
+     */
+    private void applyEvaluator() {
+        if (useNnue) {
+            try {
+                if (nnueNet == null) loadNnueNet();
+                if (nnueNet != null) {
+                    final NnueEvaluator.Network net = nnueNet;
+                    search.setEvaluator(new NnueEvaluator(net));
+                    if (smp != null) smp.setEvaluatorFactory(() -> new NnueEvaluator(net));
+                    return;
+                }
+                System.out.println("info string NNUE requested but no net loaded; using handcrafted eval");
+            } catch (Throwable t) {
+                // Catch Throwable, not Exception: if the incubator Vector API module isn't on the
+                // launch command line, first touch of NnueEvaluator fails with an Error
+                // (ExceptionInInitializerError / NoClassDefFoundError), which a `catch (Exception)`
+                // would miss. Now that NNUE is the default, such a launch must degrade to the
+                // handcrafted eval, never crash the engine.
+                nnueNet = null;
+                System.out.println("info string NNUE unavailable (" + t + "); using handcrafted eval");
+            }
+        }
+        search.setEvaluator(new HandcraftedEvaluator());
+        if (smp != null) smp.setEvaluatorFactory(HandcraftedEvaluator::new);
+    }
+
+    /** Loads the net from EvalFile, else a bundled {@code /nnue/default.nnue} resource if present. */
+    private void loadNnueNet() {
+        try {
+            if (evalFile != null && !evalFile.isBlank() && !evalFile.equals("<empty>")) {
+                try (java.io.InputStream in =
+                             java.nio.file.Files.newInputStream(java.nio.file.Path.of(evalFile))) {
+                    nnueNet = NnueEvaluator.load(in);
+                }
+                System.out.println("info string NNUE net loaded from " + evalFile);
+                return;
+            }
+            try (java.io.InputStream in = Uci.class.getResourceAsStream("/nnue/default.nnue")) {
+                if (in != null) {
+                    nnueNet = NnueEvaluator.load(in);
+                    System.out.println("info string NNUE net loaded from bundled default");
+                    return;
+                }
+            }
+            System.out.println("info string NNUE: no EvalFile set and no bundled net");
+        } catch (Exception e) {
+            nnueNet = null;
+            System.out.println("info string NNUE load failed: " + e.getMessage());
         }
     }
 
@@ -244,7 +330,13 @@ public final class Uci {
             bypassPrinted = search.bypassPrinted;
             ponderMove = search.ponderMove();
         } else {
-            if (smp == null || smp.threadCount() != threads) smp = new LazySmpSearch(threads, tt);
+            if (smp == null || smp.threadCount() != threads) {
+                smp = new LazySmpSearch(threads, tt);
+                if (useNnue && nnueNet != null) {
+                    final NnueEvaluator.Network net = nnueNet;
+                    smp.setEvaluatorFactory(() -> new NnueEvaluator(net));
+                }
+            }
             smp.setPondering(ponder);
             smp.setMoveOverhead(moveOverheadMs);
             smp.setContempt(contempt);
