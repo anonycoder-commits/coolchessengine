@@ -177,6 +177,11 @@ public final class Search {
     private static final int SOFT_BOUND_STABLE_ITERATIONS = 14;
     private static final int SOFT_BOUND_STABLE_ITERATIONS_DECISIVE = 2; // relaxed threshold once clearly winning
     private static final int SOFT_BOUND_DECISIVE_SCORE_CP = 200; // +2.00 pawns
+    // Eval-trend brake (useTimeTrendBrake): a committed root score that fell more than this many
+    // centipawns since the previous iteration means the position is turning against us, so the
+    // optimum-time soft exit is suppressed for that iteration and the engine keeps thinking. Sits
+    // between VOLATILITY_SWING_CP (30) and EVAL_LOCK_MAX_ABS_SCORE_CP (50); SPSA-tunable.
+    private static final int TREND_BRAKE_MIN_DROP_CP = 40;
 
     // Adaptive time management (useAdaptiveTime; default OFF pending a self-play gate). Replaces
     // the binary stability threshold with a *continuous* stop-time scale and adds a game-ply
@@ -555,6 +560,18 @@ public final class Search {
     // the miscalibration looks like a constant-tuning problem, not a broken idea.
     public boolean useAdaptiveTime = false;
 
+    // Eval-trend brake for the DEFAULT (non-adaptive) time path: when the committed root score
+    // drops more than TREND_BRAKE_MIN_DROP_CP since the previous iteration, suppress the
+    // optimum-time soft exit so the engine keeps thinking instead of banking the clock into a
+    // collapsing position -- the failure behind a game thrown from ~0 to mated with 50-90s of
+    // clock unused, moving in ~3s/move as the eval fell. This is the eval-TREND half of the
+    // parked adaptive-time block, extracted WITHOUT its discordant node-effort factor, so it can
+    // be gated in isolation. Still bounded by softLimitMs (at worst it spends the rest of the
+    // per-move budget, never the whole clock) and overridden by the lost-position brake. Default
+    // OFF pending a self-play gate at BOTH a fast and a slow TC -- time-management changes must
+    // never ship on a bullet result alone (see the useAdaptiveTime discordance note above).
+    public boolean useTimeTrendBrake = false;
+
     // Obvious-move pruning: skip search entirely on a forced single reply, and cut
     // iterative deepening short once a shallow iteration shows a lopsided root gap.
     public boolean useObviousMovePruning = true;
@@ -885,17 +902,29 @@ public final class Search {
                     break;
                 }
             } else if (!pondering && useTime && d >= SOFT_BOUND_MIN_DEPTH) {
+                // Eval-trend brake: if the committed root score DROPPED more than
+                // TREND_BRAKE_MIN_DROP_CP since the previous iteration, the position is turning
+                // against us -- exactly when banking the clock is most dangerous. Suppress the
+                // optimum-time soft exit for this iteration so the search keeps thinking (still
+                // bounded by softLimitMs below, and overridden by the lost-position brake once the
+                // score is clearly losing). This is the trend half of the parked adaptive-time
+                // block WITHOUT its discordant node-effort factor.
+                boolean evalFalling = useTimeTrendBrake
+                        && (prevIterScore - committedScore) > TREND_BRAKE_MIN_DROP_CP;
                 // Acceleration rule: a decisively winning score (> +2.00 pawns) needs only 2
-                // stable iterations instead of 3 -- the position is unlikely to be spoiled by
-                // one fewer confirmation, so we can bank the extra time even faster.
+                // stable iterations instead of the full SOFT_BOUND_STABLE_ITERATIONS -- the
+                // position is unlikely to be spoiled by one fewer confirmation, so we can bank the
+                // extra time even faster.
                 int requiredStableIterations = committedScore > SOFT_BOUND_DECISIVE_SCORE_CP
                         ? SOFT_BOUND_STABLE_ITERATIONS_DECISIVE
                         : SOFT_BOUND_STABLE_ITERATIONS;
                 // Arm the mid-iteration check (see checkTime()) as soon as stability is met,
                 // regardless of whether elapsed time has crossed optimumTimeMs yet -- once
                 // armed, the *next* iteration no longer needs to run to completion (or to
-                // hardLimitMs) before the engine can react to the clock catching up.
-                softStopArmed = stableIterationsCount >= requiredStableIterations;
+                // hardLimitMs) before the engine can react to the clock catching up. Never arm
+                // while the eval is falling (the trend brake above) -- a stale `true` here would
+                // still be honored mid-iteration by checkTime().
+                softStopArmed = !evalFalling && stableIterationsCount >= requiredStableIterations;
                 if (softStopArmed && elapsedMs() >= optimumTimeMs) {
                     stop = true;
                     // Propagate immediately instead of waiting for the caller to notice this
