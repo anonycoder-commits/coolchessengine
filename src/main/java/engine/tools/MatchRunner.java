@@ -257,6 +257,10 @@ public final class MatchRunner {
                 : tc == null
                         ? "Time control: fixed " + movetimeMs + "ms/move"
                         : "Time control: " + (tc.baseMs / 1000.0) + "+" + (tc.incMs / 1000.0) + " (clock-based)");
+        // Pre-flight (referee mode only): confirm each side ended up in the eval mode it was meant
+        // to. A silent NNUE->handcrafted fallback on ONE side turns a real gate into a
+        // kb10-vs-HCE measurement (~+74 Elo of pure artifact) with no other symptom.
+        if (enginePath != null) preflightEvalCheck(enginePath, opponentPath, engineOpts, opponentOpts);
         ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         List<Future<GameResult>> futures = new ArrayList<>(games);
         boolean[] engineWhiteByGame = new boolean[games];
@@ -294,6 +298,37 @@ public final class MatchRunner {
             pool.shutdownNow();
         }
         report(games);
+    }
+
+    /** Launches one instance of each engine with its options and reports the eval mode each
+     *  actually lands in. A gate meant to compare two NNUE builds is invalid if one silently
+     *  falls back to the handcrafted eval, so a clear NNUE-vs-handcrafted asymmetry is surfaced
+     *  as a distinct, greppable {@code GATE-EVAL-WARNING} line (CI fails the job on it). Never
+     *  throws -- a pre-flight hiccup must not abort the match; it just reports what it found. */
+    private void preflightEvalCheck(String enginePath, String opponentPath,
+                                    List<String> engineOpts, List<String> opponentOpts) {
+        String tested = probeEvalMode(enginePath, engineOpts, true);
+        String opponent = probeEvalMode(opponentPath, opponentOpts, false);
+        System.out.println("Pre-flight eval: tested=[" + tested + "]  opponent=[" + opponent + "]");
+        boolean asymmetric = (tested.startsWith("NNUE") && opponent.equals("HANDCRAFTED"))
+                || (tested.equals("HANDCRAFTED") && opponent.startsWith("NNUE"));
+        if (asymmetric) {
+            System.out.println("GATE-EVAL-WARNING: one side loaded NNUE, the other fell back to the"
+                    + " handcrafted eval -- almost always a net-load failure. This gate measures the"
+                    + " eval gap, not the intended change; its result is NOT trustworthy.");
+        }
+    }
+
+    /** Best-effort single-engine launch just to read its post-handshake eval mode, then close it. */
+    private String probeEvalMode(String spec, List<String> options, boolean tested) {
+        try {
+            SubprocessEngine e = new SubprocessEngine(spec, options, tested, this);
+            String mode = e.evalMode();
+            e.close();
+            return mode;
+        } catch (IOException ex) {
+            return "launch-failed(" + ex.getMessage() + ")";
+        }
     }
 
     private Callable<GameResult> gameTask(String enginePath, String opponentPath,
@@ -536,6 +571,12 @@ public final class MatchRunner {
         // Sentinel enqueued by the reader thread on stream EOF/error, so a poller blocked past
         // that point unblocks immediately instead of waiting out its full timeout for nothing.
         private static final String EOF = new Object().toString();
+        // Final eval mode, sniffed from the engine's info-string handshake ("NNUE net loaded
+        // from ..." vs a "handcrafted eval" fallback). Lets the pre-flight catch a SILENT
+        // net-load failure -- an engine meant to run NNUE that quietly fell back would otherwise
+        // skew the whole match undetected (a broken baseline once made three neutral search
+        // tweaks read as +70-110 Elo). Volatile; last write wins (state after setoptions applied).
+        private volatile String evalMode = "unknown";
 
         SubprocessEngine(String spec, List<String> options, boolean tested, MatchRunner owner) throws IOException {
             this.tested = tested;
@@ -661,9 +702,25 @@ public final class MatchRunner {
                     return null;
                 }
                 if (line == null || line == EOF) return null; // timeout or stream ended
+                sniffEval(line);
                 if (line.startsWith(prefix)) return line;
             }
         }
+
+        /** Sniff the engine's eval mode from its info-string handshake output. "NNUE net loaded
+         *  from X" -> NNUE (with source); any "handcrafted eval" fallback -> HANDCRAFTED. Last
+         *  write wins, so after the readyok barrier this reflects the state once every setoption
+         *  (UseNNUE/EvalFile) has been applied. */
+        private void sniffEval(String line) {
+            if (line.contains("NNUE net loaded")) {
+                int i = line.indexOf("loaded from ");
+                evalMode = "NNUE:" + (i >= 0 ? line.substring(i + 12).trim() : "loaded");
+            } else if (line.contains("handcrafted eval")) {
+                evalMode = "HANDCRAFTED";
+            }
+        }
+
+        String evalMode() { return evalMode; }
 
         @Override public void close() {
             try {
