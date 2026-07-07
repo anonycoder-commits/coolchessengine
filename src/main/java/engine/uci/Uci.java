@@ -42,9 +42,13 @@ public final class Uci {
     private int contempt = 10;         // UCI "Contempt" option; applied to the search per 'go'
     private LazySmpSearch smp; // built lazily once Threads > 1 is requested
 
-    // NNUE eval selection (off by default -- handcrafted eval remains the shipping default and
-    // the bench signature is unchanged unless UseNNUE is explicitly turned on with a valid net).
-    private boolean useNnue = false;
+    // NNUE eval selection. NNUE is now the shipping default (the bundled simple-b8 net gated
+    // +30 Elo [+17,+42] over the handcrafted eval at fixed time, 3000 games). Set UseNNUE=false
+    // to force the handcrafted eval. If the bundled net can't load (e.g. the incubator Vector
+    // API module isn't on the launch command line), applyEvaluator() falls back to handcrafted
+    // so the engine always plays. NB: engine.tools.Bench still benchmarks the handcrafted eval
+    // (a fixed reference), so its signature is independent of this default and unchanged.
+    private boolean useNnue = true;
     private String evalFile = "";
     private NnueEvaluator.Network nnueNet; // parsed once, shared read-only across workers
 
@@ -70,6 +74,11 @@ public final class Uci {
     }
 
     public void run() throws IOException {
+        // NNUE is the default eval, so select it up front (loads the bundled net, or degrades to
+        // handcrafted if it can't) -- otherwise a GUI that never sends `setoption UseNNUE`, which
+        // it won't since true is already the default, would silently play with the field's
+        // initial handcrafted evaluator despite advertising NNUE.
+        applyEvaluator();
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
         String line;
         while ((line = in.readLine()) != null) {
@@ -85,7 +94,7 @@ public final class Uci {
                     System.out.println("option name Ponder type check default false");
                     System.out.println("option name Move Overhead type spin default 100 min 0 max 5000");
                     System.out.println("option name Contempt type spin default 10 min -50 max 100");
-                    System.out.println("option name UseNNUE type check default false");
+                    System.out.println("option name UseNNUE type check default true");
                     System.out.println("option name EvalFile type string default <empty>");
                     System.out.println("uciok");
                     break;
@@ -212,14 +221,24 @@ public final class Uci {
      */
     private void applyEvaluator() {
         if (useNnue) {
-            if (nnueNet == null) loadNnueNet();
-            if (nnueNet != null) {
-                final NnueEvaluator.Network net = nnueNet;
-                search.setEvaluator(new NnueEvaluator(net));
-                if (smp != null) smp.setEvaluatorFactory(() -> new NnueEvaluator(net));
-                return;
+            try {
+                if (nnueNet == null) loadNnueNet();
+                if (nnueNet != null) {
+                    final NnueEvaluator.Network net = nnueNet;
+                    search.setEvaluator(new NnueEvaluator(net));
+                    if (smp != null) smp.setEvaluatorFactory(() -> new NnueEvaluator(net));
+                    return;
+                }
+                System.out.println("info string NNUE requested but no net loaded; using handcrafted eval");
+            } catch (Throwable t) {
+                // Catch Throwable, not Exception: if the incubator Vector API module isn't on the
+                // launch command line, first touch of NnueEvaluator fails with an Error
+                // (ExceptionInInitializerError / NoClassDefFoundError), which a `catch (Exception)`
+                // would miss. Now that NNUE is the default, such a launch must degrade to the
+                // handcrafted eval, never crash the engine.
+                nnueNet = null;
+                System.out.println("info string NNUE unavailable (" + t + "); using handcrafted eval");
             }
-            System.out.println("info string NNUE requested but no net loaded; using handcrafted eval");
         }
         search.setEvaluator(new HandcraftedEvaluator());
         if (smp != null) smp.setEvaluatorFactory(HandcraftedEvaluator::new);

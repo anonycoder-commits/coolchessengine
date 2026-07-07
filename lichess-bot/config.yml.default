@@ -5,9 +5,13 @@ engine:                            # Engine settings.
   dir: "./engines/"                # Directory containing the engine. This can be an absolute path or one relative to lichess-bot/.
   name: "engine_name"              # Binary name of the engine to use.
   debug: False                     # When enabled, log all startup communication with the engine.
-# interpreter: "java"
-# interpreter_options:
-#   - "-jar"
+# To run this engine (a Java jar), the actual config.yml (gitignored -- holds the token) uses:
+#   interpreter: "java"
+#   interpreter_options:
+#     - "--add-modules"          # REQUIRED before -jar: the default NNUE eval's SIMD inference
+#     - "jdk.incubator.vector"   # uses the incubator Vector API (a jar manifest can't request it).
+#     - "-jar"                   # Without it the engine still runs but silently falls back to the
+#                                # handcrafted eval, losing the bundled net's ~+30 Elo.
   working_dir: ""                  # Directory where the chess engine will read and write files. If blank or missing, the current directory is used.
                                    # NOTE: If working_dir is set, the engine will look for files and directories relative to this directory, not where lichess-bot was launched. Absolute paths are unaffected.
   protocol: "uci"                  # "uci", "xboard" or "homemade"

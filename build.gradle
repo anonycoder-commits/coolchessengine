@@ -37,8 +37,10 @@ jar {
     manifest {
         attributes 'Main-Class': 'engine.uci.Uci'
         // Launch must still pass --add-modules jdk.incubator.vector on the java command line
-        // (manifests can't request incubator modules). Only needed when UseNNUE is enabled;
-        // the handcrafted-eval path never loads the Vector API classes.
+        // (manifests can't request incubator modules). NNUE is now the DEFAULT eval, so this is
+        // required for the shipping engine to use the bundled net -- without it the engine
+        // degrades to the handcrafted eval (it never crashes; see Uci.applyEvaluator). The
+        // lichess-bot config.yml passes it via interpreter_options (see config.yml.default).
     }
 }
 
