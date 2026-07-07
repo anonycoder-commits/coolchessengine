@@ -583,7 +583,7 @@ public final class Search {
     // per-move budget, never the whole clock) and overridden by the lost-position brake. Default
     // OFF pending a self-play gate at BOTH a fast and a slow TC -- time-management changes must
     // never ship on a bullet result alone (see the useAdaptiveTime discordance note above).
-    public boolean useTimeTrendBrake = false;
+    public boolean useTimeTrendBrake = true;
 
     // Obvious-move pruning: skip search entirely on a forced single reply, and cut
     // iterative deepening short once a shallow iteration shows a lopsided root gap.
