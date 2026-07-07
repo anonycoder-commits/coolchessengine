@@ -105,6 +105,11 @@ public final class Search {
     // zugzwang-prone king/pawn endgames where passing is actually the losing option.
     private static final int NULL_MOVE_MIN_DEPTH = 3;
     private static final int NULL_MOVE_REDUCTION = 3;
+    // Eval-margin term for the null-move reduction (useNullMoveEvalScale): the further static
+    // eval already exceeds beta, the more certain a null-move cutoff is, so reduce harder. Added
+    // on top of the depth term; DIVISOR cp above beta = +1 reduction, capped at MAX_R. SPSA-tunable.
+    private static final int NULL_MOVE_EVAL_DIVISOR = 200; // 2.00 pawns above beta -> +1 reduction
+    private static final int NULL_MOVE_EVAL_MAX_R = 3;     // cap the extra reduction
     // Depth from which a null-move fail-high is re-verified by a reduced, null-move-disabled
     // search before it is trusted -- catches the zugzwang-style positions where passing looks
     // fine but every real move is bad, which the static-eval and non-pawn-material gates alone
@@ -500,6 +505,7 @@ public final class Search {
     // downside. useCutnodeLmr stays OFF (prior batch-2 negative evidence; separate retest).
     public boolean useRazoring = true;        // shallow non-PV: drop to qsearch when eval << alpha
     public boolean useProbcut = true;         // depth>=5: a good capture that survives a raised-beta qsearch cuts
+    public boolean useNullMoveEvalScale = false; // scale null-move reduction by (staticEval - beta); off pending gate
     public boolean useSingularExtDouble = true; // double / negative singular extensions
     public boolean useLmrTtCapture = true;    // reduce one extra ply when the TT move is a capture
     public boolean useHistoryPruning = true; // skip quiets with deeply negative history at shallow depth
@@ -1209,6 +1215,13 @@ public final class Search {
             // Dynamic reduction: deeper searches can afford (and benefit from) a larger null
             // reduction, since the confirming re-search still has ample depth left.
             int r = NULL_MOVE_REDUCTION + depth / 6;
+            if (useNullMoveEvalScale) {
+                // Reduce harder when the static eval already sits well above beta -- the further
+                // over, the more certain the cutoff. staticEval >= beta is guaranteed by the gate
+                // above, so this term is non-negative. Capped so a huge margin can't over-reduce;
+                // at low depth depth-1-r simply falls into qsearch as it already does today.
+                r += Math.min((staticEval - beta) / NULL_MOVE_EVAL_DIVISOR, NULL_MOVE_EVAL_MAX_R);
+            }
             pos.makeNullMove();
             moveStack[ply] = 0;
             pieceToStack[ply] = -1; // a null move is nobody's continuation
