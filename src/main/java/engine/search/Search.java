@@ -295,6 +295,12 @@ public final class Search {
     // in updateHistory() self-bounds cleanly in both directions.
     private static final int HISTORY_MAX = 100_000;
     private static final int HISTORY_MIN = -HISTORY_MAX;
+    // Continuous history-based LMR softening (useHistoryLmr): instead of a single binary -1 ply
+    // for quiets scoring >= HISTORY_MAX/2, scale the LMR reduction by the quiet's combined
+    // history score. DIVISOR score-units = 1 ply (so the legacy HISTORY_MAX/2 threshold maps to
+    // ~1 ply), clamped to +-MAX plies. SPSA-tunable.
+    private static final int HISTORY_LMR_DIVISOR = 50_000;
+    private static final int HISTORY_LMR_MAX = 2;
     // Deliberately far below HISTORY_MIN: a losing capture must never be able to outscore
     // even the most heavily-malused quiet move.
     private static final int BAD_CAPTURE_BASE = -1_000_000;
@@ -506,6 +512,7 @@ public final class Search {
     public boolean useRazoring = true;        // shallow non-PV: drop to qsearch when eval << alpha
     public boolean useProbcut = true;         // depth>=5: a good capture that survives a raised-beta qsearch cuts
     public boolean useNullMoveEvalScale = false; // scale null-move reduction by (staticEval - beta); off pending gate
+    public boolean useHistoryLmr = false;     // continuous history-scaled LMR reduction (vs binary step); off pending gate
     public boolean useSingularExtDouble = true; // double / negative singular extensions
     public boolean useLmrTtCapture = true;    // reduce one extra ply when the TT move is a capture
     public boolean useHistoryPruning = true; // skip quiets with deeply negative history at shallow depth
@@ -1509,9 +1516,21 @@ public final class Search {
                     // ...and a step softer for moves ordering already trusts: killers, or a
                     // strong combined history/continuation-history score (scores[i] is that
                     // combined signal for plain quiets; killer band values also clear it).
-                    if (move == killers[ply][0] || move == killers[ply][1]
-                            || scores[i] >= HISTORY_MAX / 2) {
-                        reduction--;
+                    if (move == killers[ply][0] || move == killers[ply][1]) {
+                        reduction--; // killers: ordering already trusts them, soften a ply
+                    } else if (useHistoryLmr && scores[i] < 3 * HISTORY_MAX) {
+                        // Continuous history-modulated softening, replacing the single binary cliff
+                        // at HISTORY_MAX/2. scores[i] here IS this quiet's combined butterfly +
+                        // continuation history (lmrCandidate requires isQuiet), range +-3*HISTORY_MAX.
+                        // Values >= 3*HISTORY_MAX are fixed ordering bands (countermove at 700k etc.),
+                        // NOT history magnitudes -- left to the legacy branch below. A well-scoring
+                        // quiet reduces less (or a ply more search); a poorly-scoring one reduces more.
+                        int histAdj = scores[i] / HISTORY_LMR_DIVISOR;
+                        if (histAdj > HISTORY_LMR_MAX) histAdj = HISTORY_LMR_MAX;
+                        else if (histAdj < -HISTORY_LMR_MAX) histAdj = -HISTORY_LMR_MAX;
+                        reduction -= histAdj;
+                    } else if (scores[i] >= HISTORY_MAX / 2) {
+                        reduction--; // countermoves; and every strong quiet when the toggle is off (legacy)
                     }
                     // Same carve-out LMP already applies: an advanced pawn push carries slow,
                     // long-term value that a quiet move's low history badly underrates, so it is
